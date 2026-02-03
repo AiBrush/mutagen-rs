@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io::{Write, Seek, SeekFrom, Read};
 use crate::common::error::{MutagenError, Result};
-use crate::common::util::read_file_cached;
 use crate::vorbis::VorbisComment;
 
 /// FLAC metadata block types.
@@ -244,7 +243,7 @@ pub struct FLACFile {
 impl FLACFile {
     /// Open and parse a FLAC file.
     pub fn open(path: &str) -> Result<Self> {
-        let data = read_file_cached(path)?;
+        let data = std::fs::read(path)?;
         Self::parse(&data, path)
     }
 

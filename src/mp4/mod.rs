@@ -2,7 +2,6 @@ pub mod atom;
 
 use std::collections::HashMap;
 use crate::common::error::{MutagenError, Result};
-use crate::common::util::read_file_cached;
 use crate::mp4::atom::{Atom, parse_atoms, find_atom_path};
 
 /// MP4 audio information.
@@ -82,7 +81,7 @@ pub struct MP4File {
 
 impl MP4File {
     pub fn open(path: &str) -> Result<Self> {
-        let data = read_file_cached(path)?;
+        let data = std::fs::read(path)?;
         Self::parse(&data, path)
     }
 

@@ -9,57 +9,8 @@ pub mod vorbis;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyBytes, PyTuple};
 use pyo3::exceptions::{PyValueError, PyKeyError, PyIOError};
-use pyo3::Py;
-use std::cell::RefCell;
+use pyo3::{Py};
 use std::collections::HashMap;
-use std::sync::Arc;
-
-// ---- Caching infrastructure ----
-
-/// Cached parsed result for MP3 files (minimal - only what benchmark needs).
-struct CachedMP3 {
-    info: PyMPEGInfo,
-    version: (u8, u8),
-    tag_keys: Vec<String>,
-    tag_py_values: Vec<(String, PyObject)>,
-}
-
-/// Cached parsed result for FLAC files - stores pre-built Python objects.
-struct CachedFLAC {
-    info_py: PyObject,     // pre-built Python StreamInfo object
-    tag_keys_py: PyObject, // pre-built Python list of keys
-    tag_py_values: Arc<Vec<(String, PyObject)>>, // shared tag data
-}
-
-/// Cached parsed result for OGG files (minimal).
-struct CachedOGG {
-    info: PyOggVorbisInfo,
-    tag_keys: Vec<String>,
-    tag_py_values: Vec<(String, PyObject)>,
-}
-
-/// Cached parsed result for MP4 files (minimal).
-struct CachedMP4 {
-    info: PyMP4Info,
-    tag_keys: Vec<String>,
-    tag_py_values: Vec<(String, PyObject)>,
-}
-
-#[derive(Clone, Copy)]
-enum DetectedFormat {
-    MP3,
-    FLAC,
-    OGG,
-    MP4,
-}
-
-thread_local! {
-    static MP3_CACHE: RefCell<HashMap<String, CachedMP3>> = RefCell::new(HashMap::with_capacity(32));
-    static FLAC_CACHE: RefCell<HashMap<String, CachedFLAC>> = RefCell::new(HashMap::with_capacity(16));
-    static OGG_CACHE: RefCell<HashMap<String, CachedOGG>> = RefCell::new(HashMap::with_capacity(8));
-    static MP4_CACHE: RefCell<HashMap<String, CachedMP4>> = RefCell::new(HashMap::with_capacity(16));
-    static FORMAT_CACHE: RefCell<HashMap<String, DetectedFormat>> = RefCell::new(HashMap::with_capacity(32));
-}
 
 // ---- Python Classes ----
 
@@ -240,7 +191,7 @@ impl PyID3 {
     }
 }
 
-/// MP3 file (ID3 tags + audio info) with aggressive caching.
+/// MP3 file (ID3 tags + audio info).
 #[pyclass(name = "MP3")]
 #[derive(Debug)]
 struct PyMP3 {
@@ -258,34 +209,6 @@ struct PyMP3 {
 impl PyMP3 {
     #[new]
     fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
-        // Try cache first
-        let from_cache = MP3_CACHE.with(|cache| {
-            let c = cache.borrow();
-            if let Some(cached) = c.get(filename) {
-                let tag_value_cache: HashMap<String, PyObject> = cached.tag_py_values.iter()
-                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-                    .collect();
-                Some(PyMP3 {
-                    info: cached.info.clone(),
-                    filename: filename.to_string(),
-                    id3: PyID3 {
-                        tags: id3::tags::ID3Tags::new(),
-                        path: Some(filename.to_string()),
-                        version: cached.version,
-                    },
-                    tag_value_cache,
-                    tag_keys_cache: cached.tag_keys.clone(),
-                })
-            } else {
-                None
-            }
-        });
-
-        if let Some(mp3) = from_cache {
-            return Ok(mp3);
-        }
-
-        // Cache miss: parse file
         let mp3_file = mp3::MP3File::open(filename)?;
 
         let info = make_mpeg_info(&mp3_file.info);
@@ -295,19 +218,7 @@ impl PyMP3 {
         let mut tags = mp3_file.tags;
         let (tag_keys, tag_py_values) = precompute_id3_py_values(py, &mut tags);
 
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect();
-
-        // Store in cache
-        MP3_CACHE.with(|cache| {
-            cache.borrow_mut().insert(filename.to_string(), CachedMP3 {
-                info: info.clone(),
-                version,
-                tag_keys: tag_keys.clone(),
-                tag_py_values,
-            });
-        });
+        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
 
         Ok(PyMP3 {
             info,
@@ -467,45 +378,22 @@ impl PyVComment {
     }
 }
 
-/// FLAC file with zero-copy cache hits.
-/// Uses Rc<Vec> for shared tag data — no per-instance cloning.
+/// FLAC file.
 #[pyclass(name = "FLAC")]
 struct PyFLAC {
     info_py: PyObject,
     #[pyo3(get)]
     filename: String,
-    tag_keys_py: PyObject,    // pre-built Python list for keys()
-    tag_py_values: Arc<Vec<(String, PyObject)>>, // shared with cache, no clone needed
-    flac_file: Option<flac::FLACFile>,
-    vc_data: Option<vorbis::VorbisComment>,
+    tag_keys_py: PyObject,
+    tag_py_values: Vec<(String, PyObject)>,
+    flac_file: flac::FLACFile,
+    vc_data: vorbis::VorbisComment,
 }
 
 #[pymethods]
 impl PyFLAC {
     #[new]
     fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
-        // Try cache first — ultra-lightweight hit path
-        let from_cache = FLAC_CACHE.with(|cache| {
-            let c = cache.borrow();
-            c.get(filename).map(|cached| (
-                cached.info_py.clone_ref(py),
-                cached.tag_keys_py.clone_ref(py),
-                cached.tag_py_values.clone(), // Rc clone = just increment counter
-            ))
-        });
-
-        if let Some((info_py, tag_keys_py, tag_py_values)) = from_cache {
-            return Ok(PyFLAC {
-                info_py,
-                filename: filename.to_string(),
-                tag_keys_py,
-                tag_py_values,
-                flac_file: None,
-                vc_data: None,
-            });
-        }
-
-        // Cache miss: parse file
         let flac_file = flac::FLACFile::open(filename)?;
 
         let info = PyStreamInfo {
@@ -524,26 +412,16 @@ impl PyFLAC {
 
         let vc_data = flac_file.tags.clone().unwrap_or_else(|| vorbis::VorbisComment::new());
         let (tag_keys, tag_py_values) = precompute_vc_py_values(py, &vc_data);
-        let tag_py_values = Arc::new(tag_py_values);
 
         let tag_keys_py = PyList::new(py, &tag_keys)?.into_any().unbind();
-
-        // Cache pre-built Python objects
-        FLAC_CACHE.with(|cache| {
-            cache.borrow_mut().insert(filename.to_string(), CachedFLAC {
-                info_py: info_py.clone_ref(py),
-                tag_keys_py: tag_keys_py.clone_ref(py),
-                tag_py_values: tag_py_values.clone(),
-            });
-        });
 
         Ok(PyFLAC {
             info_py,
             filename: filename.to_string(),
             tag_keys_py,
             tag_py_values,
-            flac_file: Some(flac_file),
-            vc_data: Some(vc_data),
+            flac_file,
+            vc_data,
         })
     }
 
@@ -554,7 +432,7 @@ impl PyFLAC {
 
     #[getter]
     fn tags(&self, py: Python) -> PyResult<PyObject> {
-        let vc = self.vc_data.clone().unwrap_or_else(|| vorbis::VorbisComment::new());
+        let vc = self.vc_data.clone();
         let pvc = PyVComment { vc, path: Some(self.filename.clone()) };
         Ok(pvc.into_pyobject(py)?.into_any().unbind())
     }
@@ -581,10 +459,8 @@ impl PyFLAC {
     }
 
     fn save(&self) -> PyResult<()> {
-        match &self.flac_file {
-            Some(f) => { f.save()?; Ok(()) }
-            None => Err(PyValueError::new_err("FLAC file not fully loaded (cached). Re-open for save."))
-        }
+        self.flac_file.save()?;
+        Ok(())
     }
 }
 
@@ -619,7 +495,7 @@ impl PyOggVorbisInfo {
     }
 }
 
-/// OGG Vorbis file with caching.
+/// OGG Vorbis file.
 #[pyclass(name = "OggVorbis")]
 #[derive(Debug)]
 struct PyOggVorbis {
@@ -636,29 +512,6 @@ struct PyOggVorbis {
 impl PyOggVorbis {
     #[new]
     fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
-        // Try cache
-        let from_cache = OGG_CACHE.with(|cache| {
-            let c = cache.borrow();
-            if let Some(cached) = c.get(filename) {
-                let tag_value_cache: HashMap<String, PyObject> = cached.tag_py_values.iter()
-                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-                    .collect();
-                Some((cached.info.clone(), cached.tag_keys.clone(), tag_value_cache))
-            } else {
-                None
-            }
-        });
-
-        if let Some((info, tag_keys, tag_value_cache)) = from_cache {
-            return Ok(PyOggVorbis {
-                info,
-                filename: filename.to_string(),
-                vc: PyVComment { vc: vorbis::VorbisComment::new(), path: Some(filename.to_string()) },
-                tag_value_cache,
-                tag_keys_cache: tag_keys,
-            });
-        }
-
         let ogg_file = ogg::OggVorbisFile::open(filename)?;
 
         let info = PyOggVorbisInfo {
@@ -669,17 +522,7 @@ impl PyOggVorbis {
         };
 
         let (tag_keys, tag_py_values) = precompute_vc_py_values(py, &ogg_file.tags);
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect();
-
-        OGG_CACHE.with(|cache| {
-            cache.borrow_mut().insert(filename.to_string(), CachedOGG {
-                info: info.clone(),
-                tag_keys: tag_keys.clone(),
-                tag_py_values,
-            });
-        });
+        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
 
         let vc = PyVComment {
             vc: ogg_file.tags,
@@ -801,7 +644,7 @@ impl PyMP4Tags {
     }
 }
 
-/// MP4 file with caching.
+/// MP4 file.
 #[pyclass(name = "MP4")]
 #[derive(Debug)]
 struct PyMP4 {
@@ -818,29 +661,6 @@ struct PyMP4 {
 impl PyMP4 {
     #[new]
     fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
-        // Try cache
-        let from_cache = MP4_CACHE.with(|cache| {
-            let c = cache.borrow();
-            if let Some(cached) = c.get(filename) {
-                let tag_value_cache: HashMap<String, PyObject> = cached.tag_py_values.iter()
-                    .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-                    .collect();
-                Some((cached.info.clone(), cached.tag_keys.clone(), tag_value_cache))
-            } else {
-                None
-            }
-        });
-
-        if let Some((info, tag_keys, tag_value_cache)) = from_cache {
-            return Ok(PyMP4 {
-                info,
-                filename: filename.to_string(),
-                mp4_tags: PyMP4Tags { tags: mp4::MP4Tags::new() },
-                tag_value_cache,
-                tag_keys_cache: tag_keys,
-            });
-        }
-
         let mp4_file = mp4::MP4File::open(filename)?;
 
         let info = PyMP4Info {
@@ -854,17 +674,7 @@ impl PyMP4 {
         };
 
         let (tag_keys, tag_py_values) = precompute_mp4_py_values(py, &mp4_file.tags);
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.iter()
-            .map(|(k, v)| (k.clone(), v.clone_ref(py)))
-            .collect();
-
-        MP4_CACHE.with(|cache| {
-            cache.borrow_mut().insert(filename.to_string(), CachedMP4 {
-                info: info.clone(),
-                tag_keys: tag_keys.clone(),
-                tag_py_values,
-            });
-        });
+        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
 
         let mp4_tags = PyMP4Tags {
             tags: mp4_file.tags,
@@ -1099,40 +909,13 @@ fn mp4_value_to_py(py: Python, value: &mp4::MP4TagValue) -> PyResult<PyObject> {
     }
 }
 
-/// Auto-detect file format and open. Uses format cache for fast repeated access.
+/// Auto-detect file format and open.
 #[pyfunction]
 #[pyo3(signature = (filename, easy=false))]
 fn file_open(py: Python<'_>, filename: &str, easy: bool) -> PyResult<PyObject> {
     let _ = easy;
 
-    // Fast path: check format cache (avoids file read + scoring on repeated calls)
-    let cached_format = FORMAT_CACHE.with(|cache| {
-        cache.borrow().get(filename).copied()
-    });
-
-    if let Some(fmt) = cached_format {
-        return match fmt {
-            DetectedFormat::MP3 => {
-                let f = PyMP3::new(py, filename)?;
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            }
-            DetectedFormat::FLAC => {
-                let f = PyFLAC::new(py, filename)?;
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            }
-            DetectedFormat::OGG => {
-                let f = PyOggVorbis::new(py, filename)?;
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            }
-            DetectedFormat::MP4 => {
-                let f = PyMP4::new(py, filename)?;
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            }
-        };
-    }
-
-    // First call: read file once using cached reader, score all formats
-    let data = common::util::read_file_cached(filename)
+    let data = std::fs::read(filename)
         .map_err(|e| PyIOError::new_err(format!("Cannot open file: {}", e)))?;
 
     let mp3_score = mp3::MP3File::score(filename, &data);
@@ -1149,38 +932,18 @@ fn file_open(py: Python<'_>, filename: &str, easy: bool) -> PyResult<PyObject> {
         )));
     }
 
-    // Detect format, cache it, then open
-    let detected = if max_score == flac_score {
-        DetectedFormat::FLAC
+    if max_score == flac_score {
+        let f = PyFLAC::new(py, filename)?;
+        Ok(f.into_pyobject(py)?.into_any().unbind())
     } else if max_score == ogg_score {
-        DetectedFormat::OGG
+        let f = PyOggVorbis::new(py, filename)?;
+        Ok(f.into_pyobject(py)?.into_any().unbind())
     } else if max_score == mp4_score {
-        DetectedFormat::MP4
+        let f = PyMP4::new(py, filename)?;
+        Ok(f.into_pyobject(py)?.into_any().unbind())
     } else {
-        DetectedFormat::MP3
-    };
-
-    FORMAT_CACHE.with(|cache| {
-        cache.borrow_mut().insert(filename.to_string(), detected);
-    });
-
-    match detected {
-        DetectedFormat::FLAC => {
-            let f = PyFLAC::new(py, filename)?;
-            Ok(f.into_pyobject(py)?.into_any().unbind())
-        }
-        DetectedFormat::OGG => {
-            let f = PyOggVorbis::new(py, filename)?;
-            Ok(f.into_pyobject(py)?.into_any().unbind())
-        }
-        DetectedFormat::MP4 => {
-            let f = PyMP4::new(py, filename)?;
-            Ok(f.into_pyobject(py)?.into_any().unbind())
-        }
-        DetectedFormat::MP3 => {
-            let f = PyMP3::new(py, filename)?;
-            Ok(f.into_pyobject(py)?.into_any().unbind())
-        }
+        let f = PyMP3::new(py, filename)?;
+        Ok(f.into_pyobject(py)?.into_any().unbind())
     }
 }
 

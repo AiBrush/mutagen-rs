@@ -2,7 +2,6 @@ pub mod header;
 pub mod xing;
 
 use crate::common::error::{MutagenError, Result};
-use crate::common::util::read_file_cached;
 use crate::id3;
 use crate::id3::header::ID3Header;
 use crate::id3::tags::ID3Tags;
@@ -124,7 +123,7 @@ pub struct MP3File {
 impl MP3File {
     /// Open and parse an MP3 file using cached file reads.
     pub fn open(path: &str) -> Result<Self> {
-        let data = read_file_cached(path)?;
+        let data = std::fs::read(path)?;
         Self::parse(&data, path)
     }
 

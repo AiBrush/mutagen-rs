@@ -1,7 +1,6 @@
 use std::fs::File;
 use std::io::{Read, Write, Seek, SeekFrom};
 use crate::common::error::{MutagenError, Result};
-use crate::common::util::read_file_cached;
 use crate::vorbis::VorbisComment;
 
 /// A single OGG page.
@@ -153,7 +152,7 @@ pub struct OggVorbisFile {
 
 impl OggVorbisFile {
     pub fn open(path: &str) -> Result<Self> {
-        let data = read_file_cached(path)?;
+        let data = std::fs::read(path)?;
         Self::parse(&data, path)
     }
 

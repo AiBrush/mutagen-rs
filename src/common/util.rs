@@ -1,28 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
-use std::cell::RefCell;
-use std::collections::HashMap;
 use crate::common::error::{MutagenError, Result};
-
-thread_local! {
-    static FILE_CACHE: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::with_capacity(64));
-}
-
-/// Read a file, caching the result for subsequent reads of the same path.
-/// This dramatically speeds up benchmarks where the same files are read repeatedly.
-pub fn read_file_cached(path: &str) -> std::io::Result<Vec<u8>> {
-    FILE_CACHE.with(|cache| {
-        {
-            let c = cache.borrow();
-            if let Some(data) = c.get(path) {
-                return Ok(data.clone());
-            }
-        }
-        let data = std::fs::read(path)?;
-        cache.borrow_mut().insert(path.to_string(), data.clone());
-        Ok(data)
-    })
-}
 
 /// Insert `count` bytes at `offset` in the file, shifting existing data forward.
 pub fn insert_bytes(fobj: &mut File, size: u64, offset: u64) -> Result<()> {

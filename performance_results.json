@@ -1,37 +1,37 @@
 {
   "mp3": {
     "files": 19,
-    "original_ms_per_file": 0.14685089454839104,
-    "rust_ms_per_file": 0.0011195232601542223,
-    "speedup": 131.1727051818122,
-    "passed": true
+    "original_ms_per_file": 0.14814542067286215,
+    "rust_ms_per_file": 0.009404311544801059,
+    "speedup": 15.752925662565984,
+    "passed": false
   },
   "flac": {
     "files": 6,
-    "original_ms_per_file": 0.06805899708221357,
-    "rust_ms_per_file": 0.0005516534050305685,
-    "speedup": 123.37274901519415,
-    "passed": true
+    "original_ms_per_file": 0.06748235318809748,
+    "rust_ms_per_file": 0.012071842017273108,
+    "speedup": 5.590062650881259,
+    "passed": false
   },
   "ogg": {
     "files": 3,
-    "original_ms_per_file": 0.1500816239664952,
-    "rust_ms_per_file": 0.0009066425263881683,
-    "speedup": 165.5356103406951,
-    "passed": true
+    "original_ms_per_file": 0.17673467906812826,
+    "rust_ms_per_file": 0.035776679093639054,
+    "speedup": 4.939940864985173,
+    "passed": false
   },
   "mp4": {
     "files": 9,
-    "original_ms_per_file": 0.13707244458297888,
-    "rust_ms_per_file": 0.0009211038963662254,
-    "speedup": 148.81322847914618,
-    "passed": true
+    "original_ms_per_file": 0.13645888409680793,
+    "rust_ms_per_file": 0.009749007100860277,
+    "speedup": 13.997208401332113,
+    "passed": false
   },
   "auto_detect": {
     "files": 37,
-    "original_ms_per_file": 0.17213251290691864,
-    "rust_ms_per_file": 0.000465132698819444,
-    "speedup": 370.0718383029385,
-    "passed": true
+    "original_ms_per_file": 0.17389034651018478,
+    "rust_ms_per_file": 0.019610167254467268,
+    "speedup": 8.867356624435313,
+    "passed": false
   }
 }
