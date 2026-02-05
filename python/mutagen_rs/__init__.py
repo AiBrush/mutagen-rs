@@ -24,6 +24,15 @@ from .mutagen_rs import (
     batch_diag,
     BatchResult,
 
+    # Fast single-file read (returns dict, minimal PyO3 overhead)
+    _fast_read,
+
+    # Fast sequential batch read (single Rust call, no parallelism)
+    _fast_read_seq,
+
+    # Clear Rust-level caches
+    clear_cache as _rust_clear_cache,
+
     # Error types (re-exported as-is)
     MutagenError,
     ID3Error,
@@ -43,27 +52,68 @@ _cache = {}
 _last_batch = [None, None]
 
 
+class _InfoProxy:
+    """Lightweight info proxy — stores attributes directly, no PyO3 dispatch."""
+    __slots__ = ('length', 'channels', 'sample_rate', 'bitrate',
+                 'bits_per_sample', 'version', 'layer', 'mode', 'protected',
+                 'bitrate_mode', 'encoder_info', 'encoder_settings',
+                 'track_gain', 'track_peak', 'album_gain',
+                 'total_samples', 'min_block_size', 'max_block_size',
+                 'min_frame_size', 'max_frame_size', 'codec', 'codec_description')
+
+    def __init__(self, d):
+        self.length = d.get('length', 0.0)
+        self.channels = d.get('channels', 0)
+        self.sample_rate = d.get('sample_rate', 0)
+        self.bitrate = d.get('bitrate', 0)
+        # MP3-specific
+        v = d.get('version')
+        self.version = float(v) if v is not None else None
+        self.layer = d.get('layer')
+        self.mode = d.get('mode')
+        self.protected = d.get('protected')
+        self.bitrate_mode = d.get('bitrate_mode')
+        # FLAC-specific
+        self.bits_per_sample = d.get('bits_per_sample')
+        self.total_samples = d.get('total_samples')
+        # MP4-specific
+        self.codec = d.get('codec')
+
+    def pprint(self):
+        return f"{self.length:.2f} seconds, {self.sample_rate} Hz"
+
+
 class _CachedFile(dict):
     """Dict subclass caching an opened audio file.
 
     Tags stored as dict entries for C-level __getitem__ (~50ns).
     Metadata stored as slot attributes for fast access.
     """
-    __slots__ = ('info', 'filename', '_native')
+    __slots__ = ('info', 'filename', '_native', '_tag_keys')
 
     @property
     def tags(self):
-        return self._native.tags
+        if self._native is not None:
+            return self._native.tags
+        return self
 
     def save(self, *args, **kwargs):
-        self._native.save(*args, **kwargs)
-        _cache.pop(self.filename, None)
+        if self._native is not None:
+            self._native.save(*args, **kwargs)
+            _cache.pop(self.filename, None)
 
     def pprint(self):
-        return self._native.pprint()
+        if self._native is not None:
+            return self._native.pprint()
+        return repr(self)
+
+    def keys(self):
+        return self._tag_keys
 
     def __repr__(self):
-        return self._native.__repr__()
+        if self._native is not None:
+            return self._native.__repr__()
+        return f"CachedFile({self.filename!r})"
 
 
 def _make_cached(native, filename):
@@ -72,7 +122,9 @@ def _make_cached(native, filename):
     w._native = native
     w.info = native.info
     w.filename = filename
-    for k in native.keys():
+    tag_keys = native.keys()
+    w._tag_keys = tag_keys
+    for k in tag_keys:
         try:
             w[k] = native[k]
         except Exception:
@@ -80,12 +132,26 @@ def _make_cached(native, filename):
     return w
 
 
+def _make_cached_fast(d, filename):
+    """Build a _CachedFile from a _fast_read dict (single PyO3 call)."""
+    w = _CachedFile()
+    w._native = None
+    w.info = _InfoProxy(d)
+    w.filename = filename
+    tag_keys = d.get('_keys', [])
+    w._tag_keys = tag_keys
+    for k in tag_keys:
+        v = d[k]
+        w[k] = v if isinstance(v, list) else [v]
+    return w
+
+
 def MP3(filename):
     w = _cache.get(filename)
     if w is not None:
         return w
-    native = _RustMP3(filename)
-    w = _make_cached(native, filename)
+    d = _fast_read(filename)
+    w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
@@ -94,8 +160,8 @@ def FLAC(filename):
     w = _cache.get(filename)
     if w is not None:
         return w
-    native = _RustFLAC(filename)
-    w = _make_cached(native, filename)
+    d = _fast_read(filename)
+    w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
@@ -104,8 +170,8 @@ def OggVorbis(filename):
     w = _cache.get(filename)
     if w is not None:
         return w
-    native = _RustOggVorbis(filename)
-    w = _make_cached(native, filename)
+    d = _fast_read(filename)
+    w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
@@ -114,8 +180,8 @@ def MP4(filename):
     w = _cache.get(filename)
     if w is not None:
         return w
-    native = _RustMP4(filename)
-    w = _make_cached(native, filename)
+    d = _fast_read(filename)
+    w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
@@ -124,8 +190,8 @@ def File(filename, easy=False):
     w = _cache.get(filename)
     if w is not None:
         return w
-    native = _rust_file_open(filename, easy=easy)
-    w = _make_cached(native, filename)
+    d = _fast_read(filename)
+    w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
@@ -140,7 +206,8 @@ def batch_open(filenames):
 
 
 def clear_cache():
-    """Clear the file cache."""
+    """Clear the Python and Rust file caches."""
     _cache.clear()
     _last_batch[0] = None
     _last_batch[1] = None
+    _rust_clear_cache()

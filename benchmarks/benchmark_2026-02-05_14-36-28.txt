@@ -1,0 +1,157 @@
+==========================================
+  Benchmark Run: Thu Feb  5 02:36:28 PM CET 2026
+==========================================
+
+>>> Building mutagen_rs (release)...
+📦 Built wheel for CPython 3.14 to /tmp/.tmp0dLVML/mutagen_rs-0.1.0-cp314-cp314-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed mutagen-rs-0.1.0
+
+==========================================
+  Python: mutagen_rs vs mutagen
+==========================================
+
+Test files: {'mp3': 21, 'mp4': 9, 'flac': 9, 'ogg': 3}
+Iterations: 200
+
+Benchmarking mp3 (19 files)...
+  Original: 0.1448 ms/file
+  Rust:     0.0014 ms/file
+  Speedup:  106.5x [PASS]
+
+Benchmarking flac (7 files)...
+  Original: 0.0643 ms/file
+  Rust:     0.0013 ms/file
+  Speedup:  49.6x [FAIL]
+
+Benchmarking ogg (3 files)...
+  Original: 0.1569 ms/file
+  Rust:     0.0011 ms/file
+  Speedup:  139.2x [PASS]
+
+Benchmarking mp4 (9 files)...
+  Original: 0.1365 ms/file
+  Rust:     0.0012 ms/file
+  Speedup:  111.9x [PASS]
+
+Benchmarking auto-detect (38 files)...
+  Original: 0.1734 ms/file
+  Rust:     0.0014 ms/file
+  Speedup:  126.1x [PASS]
+
+==================================================
+BATCH API BENCHMARK (rayon parallel, 40 copies)
+==================================================
+
+Batch mp3 (760 unique files)...
+  Original:    0.1513 ms/file
+  Rust batch:  0.0008 ms/file  178.3x [PASS]
+
+Batch flac (280 unique files)...
+  Original:    0.0667 ms/file
+  Rust batch:  0.0005 ms/file  128.9x [PASS]
+
+Batch ogg (120 unique files)...
+  Original:    0.1009 ms/file
+  Rust batch:  0.0005 ms/file  195.0x [PASS]
+
+Batch mp4 (360 unique files)...
+  Original:    0.1473 ms/file
+  Rust batch:  0.0011 ms/file  130.4x [PASS]
+
+Batch auto-detect (1520 unique files)...
+  Original:    0.1747 ms/file
+  Rust batch:  0.0007 ms/file  267.7x [PASS]
+
+==================================================
+SOME BENCHMARKS BELOW 100x TARGET
+Results saved to /home/tarek/tarek/projects/mutagen-rs/performance_results.json
+
+==========================================
+  Rust Criterion: mutagen_rs vs lofty-rs
+==========================================
+
+Benchmarking mp3_large/mutagen_rs
+Benchmarking mp3_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp3_large/mutagen_rs: Collecting 100 samples in estimated 5.0002 s (45M iterations)
+Benchmarking mp3_large/mutagen_rs: Analyzing
+mp3_large/mutagen_rs    time:   [105.21 ns 105.72 ns 106.29 ns]
+Benchmarking mp3_large/lofty
+Benchmarking mp3_large/lofty: Warming up for 3.0000 s
+Benchmarking mp3_large/lofty: Collecting 100 samples in estimated 5.0098 s (359k iterations)
+Benchmarking mp3_large/lofty: Analyzing
+mp3_large/lofty         time:   [13.934 µs 14.014 µs 14.087 µs]
+Benchmarking mp3_small/mutagen_rs
+Benchmarking mp3_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp3_small/mutagen_rs: Collecting 100 samples in estimated 5.0003 s (45M iterations)
+Benchmarking mp3_small/mutagen_rs: Analyzing
+mp3_small/mutagen_rs    time:   [105.93 ns 106.65 ns 107.33 ns]
+Benchmarking mp3_small/lofty
+Benchmarking mp3_small/lofty: Warming up for 3.0000 s
+Benchmarking mp3_small/lofty: Collecting 100 samples in estimated 5.0069 s (1.1M iterations)
+Benchmarking mp3_small/lofty: Analyzing
+mp3_small/lofty         time:   [4.5478 µs 4.5714 µs 4.5950 µs]
+Benchmarking flac_large/mutagen_rs
+Benchmarking flac_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking flac_large/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (42M iterations)
+Benchmarking flac_large/mutagen_rs: Analyzing
+flac_large/mutagen_rs   time:   [117.73 ns 118.28 ns 118.92 ns]
+Benchmarking flac_large/lofty
+Benchmarking flac_large/lofty: Warming up for 3.0000 s
+Benchmarking flac_large/lofty: Collecting 100 samples in estimated 5.0638 s (343k iterations)
+Benchmarking flac_large/lofty: Analyzing
+flac_large/lofty        time:   [14.559 µs 14.630 µs 14.708 µs]
+Benchmarking flac_small/mutagen_rs
+Benchmarking flac_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking flac_small/mutagen_rs: Collecting 100 samples in estimated 5.0002 s (31M iterations)
+Benchmarking flac_small/mutagen_rs: Analyzing
+flac_small/mutagen_rs   time:   [158.30 ns 159.29 ns 160.39 ns]
+Benchmarking flac_small/lofty
+Benchmarking flac_small/lofty: Warming up for 3.0000 s
+Benchmarking flac_small/lofty: Collecting 100 samples in estimated 5.0062 s (1.9M iterations)
+Benchmarking flac_small/lofty: Analyzing
+flac_small/lofty        time:   [2.6638 µs 2.6853 µs 2.7091 µs]
+Benchmarking ogg_large/mutagen_rs
+Benchmarking ogg_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking ogg_large/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (338M iterations)
+Benchmarking ogg_large/mutagen_rs: Analyzing
+ogg_large/mutagen_rs    time:   [14.509 ns 14.560 ns 14.617 ns]
+Benchmarking ogg_large/lofty
+Benchmarking ogg_large/lofty: Warming up for 3.0000 s
+Benchmarking ogg_large/lofty: Collecting 100 samples in estimated 5.6169 s (30k iterations)
+Benchmarking ogg_large/lofty: Analyzing
+ogg_large/lofty         time:   [182.92 µs 184.07 µs 185.48 µs]
+Benchmarking ogg_small/mutagen_rs
+Benchmarking ogg_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking ogg_small/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (334M iterations)
+Benchmarking ogg_small/mutagen_rs: Analyzing
+ogg_small/mutagen_rs    time:   [14.695 ns 14.751 ns 14.813 ns]
+Benchmarking ogg_small/lofty
+Benchmarking ogg_small/lofty: Warming up for 3.0000 s
+Benchmarking ogg_small/lofty: Collecting 100 samples in estimated 5.0031 s (7.7M iterations)
+Benchmarking ogg_small/lofty: Analyzing
+ogg_small/lofty         time:   [641.55 ns 644.45 ns 647.76 ns]
+Benchmarking mp4_large/mutagen_rs
+Benchmarking mp4_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp4_large/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (77M iterations)
+Benchmarking mp4_large/mutagen_rs: Analyzing
+mp4_large/mutagen_rs    time:   [65.619 ns 65.964 ns 66.345 ns]
+Benchmarking mp4_large/lofty
+Benchmarking mp4_large/lofty: Warming up for 3.0000 s
+Benchmarking mp4_large/lofty: Collecting 100 samples in estimated 5.0542 s (298k iterations)
+Benchmarking mp4_large/lofty: Analyzing
+mp4_large/lofty         time:   [17.014 µs 17.107 µs 17.212 µs]
+Benchmarking mp4_small/mutagen_rs
+Benchmarking mp4_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp4_small/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (88M iterations)
+Benchmarking mp4_small/mutagen_rs: Analyzing
+mp4_small/mutagen_rs    time:   [57.421 ns 57.955 ns 58.462 ns]
+Benchmarking mp4_small/lofty
+Benchmarking mp4_small/lofty: Warming up for 3.0000 s
+Benchmarking mp4_small/lofty: Collecting 100 samples in estimated 5.0032 s (2.0M iterations)
+Benchmarking mp4_small/lofty: Analyzing
+mp4_small/lofty         time:   [2.5209 µs 2.5349 µs 2.5495 µs]
+
+==========================================
+  Done: Thu Feb  5 02:40:44 PM CET 2026
+==========================================

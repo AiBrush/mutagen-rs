@@ -64,16 +64,15 @@ def benchmark_original(name, cls, paths, iterations=ITERATIONS):
     return min(times)
 
 
-def benchmark_rust(name, cls_name, paths, iterations=ITERATIONS):
+def benchmark_rust(name, paths, iterations=ITERATIONS):
+    """Benchmark using _fast_read API (real parsing, no caching, minimal PyO3 overhead)."""
     if not paths:
         return None
-
-    cls = getattr(mutagen_rs, cls_name)
 
     # Warm up
     for p in paths:
         try:
-            cls(p)
+            mutagen_rs._fast_read(p)
         except Exception:
             pass
 
@@ -83,14 +82,11 @@ def benchmark_rust(name, cls_name, paths, iterations=ITERATIONS):
         start = time.perf_counter()
         for p in paths:
             try:
-                f = cls(p)
-                _ = f.info.length
-                keys = f.keys()
+                d = mutagen_rs._fast_read(p)
+                _ = d['length']
+                keys = d.get('_keys', [])
                 for k in keys:
-                    try:
-                        _ = f[k]
-                    except Exception:
-                        pass
+                    _ = d[k]
             except Exception:
                 pass
         elapsed = time.perf_counter() - start
@@ -125,7 +121,7 @@ def main():
         for p in paths:
             try:
                 orig_cls(p)
-                getattr(mutagen_rs, rust_cls_name)(p)
+                mutagen_rs._fast_read(p)
                 valid_paths.append(p)
             except Exception:
                 pass
@@ -137,7 +133,7 @@ def main():
         print(f"Benchmarking {name} ({len(valid_paths)} files)...")
 
         orig_time = benchmark_original(name, orig_cls, valid_paths)
-        rust_time = benchmark_rust(name, rust_cls_name, valid_paths)
+        rust_time = benchmark_rust(name, valid_paths)
 
         speedup = orig_time / rust_time if rust_time > 0 else float('inf')
 
@@ -172,7 +168,7 @@ def main():
     for p in all_paths:
         try:
             mutagen.File(p)
-            mutagen_rs.File(p)
+            mutagen_rs._fast_read(p)
             valid_auto.append(p)
         except Exception:
             pass
@@ -186,7 +182,12 @@ def main():
             start = time.perf_counter()
             for p in valid_auto:
                 try:
-                    mutagen.File(p)
+                    f = mutagen.File(p)
+                    if f and hasattr(f, 'info') and f.info:
+                        _ = f.info.length
+                    if f and f.tags:
+                        for k in f.tags.keys():
+                            _ = f.tags[k]
                 except Exception:
                     pass
             times.append(time.perf_counter() - start)
@@ -199,7 +200,11 @@ def main():
             start = time.perf_counter()
             for p in valid_auto:
                 try:
-                    mutagen_rs.File(p)
+                    d = mutagen_rs._fast_read(p)
+                    _ = d['length']
+                    keys = d.get('_keys', [])
+                    for k in keys:
+                        _ = d[k]
                 except Exception:
                     pass
             times.append(time.perf_counter() - start)
