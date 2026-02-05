@@ -1776,11 +1776,12 @@ fn file_open(py: Python<'_>, filename: &str, easy: bool) -> PyResult<PyObject> {
     }
 }
 
-/// Clear result caches. File data cache preserved (OS page cache equivalent).
+/// Clear the in-memory file data cache, forcing subsequent reads to hit the filesystem.
 #[pyfunction]
 fn clear_cache() {
-    // File data cache intentionally preserved — equivalent to OS page cache,
-    // just avoids redundant syscalls. No result/parse caches exist to clear.
+    let cache = get_file_cache();
+    let mut guard = cache.write().unwrap();
+    guard.clear();
 }
 
 /// Alias for batch_open (used by benchmark scripts).
@@ -2790,6 +2791,193 @@ unsafe fn mp4_data_to_py_raw(py: Python<'_>, atom_name: &[u8; 4], type_ind: u32,
     }
 }
 
+// ---- Info-only parsers: parse audio metadata without creating tag Python objects ----
+
+/// FLAC info only: just StreamInfo, skip VorbisComment.
+#[inline(always)]
+fn fast_info_flac<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) -> PyResult<bool> {
+    let flac_offset = if data.len() >= 4 && &data[0..4] == b"fLaC" {
+        0
+    } else if data.len() >= 10 && &data[0..3] == b"ID3" {
+        let size = id3::header::BitPaddedInt::syncsafe(&data[6..10]) as usize;
+        let off = 10 + size;
+        if off + 4 > data.len() || &data[off..off+4] != b"fLaC" { return Ok(false); }
+        off
+    } else {
+        return Ok(false);
+    };
+    let mut pos = flac_offset + 4;
+    loop {
+        if pos + 4 > data.len() { break; }
+        let header = data[pos];
+        let is_last = header & 0x80 != 0;
+        let bt = header & 0x7F;
+        let block_size = ((data[pos+1] as usize) << 16) | ((data[pos+2] as usize) << 8) | (data[pos+3] as usize);
+        pos += 4;
+        if pos + block_size > data.len() { break; }
+        if bt == 0 {
+            if let Ok(si) = flac::StreamInfo::parse(&data[pos..pos+block_size]) {
+                let dict_ptr = dict.as_ptr();
+                unsafe {
+                    set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), si.length);
+                    set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), si.sample_rate);
+                    set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), si.channels as u32);
+                }
+                return Ok(true);
+            }
+        }
+        pos += block_size;
+        if is_last { break; }
+    }
+    Ok(false)
+}
+
+/// OGG info only: parse identification header + last granule, skip VorbisComment.
+#[inline(always)]
+fn fast_info_ogg<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) -> PyResult<bool> {
+    if data.len() < 58 || &data[0..4] != b"OggS" { return Ok(false); }
+    let serial = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
+    let num_seg = data[26] as usize;
+    let seg_table_end = 27 + num_seg;
+    if seg_table_end + 30 > data.len() { return Ok(false); }
+    let id_data = &data[seg_table_end..];
+    if id_data.len() < 30 || &id_data[0..7] != b"\x01vorbis" { return Ok(false); }
+    let channels = id_data[11];
+    let sample_rate = u32::from_le_bytes([id_data[12], id_data[13], id_data[14], id_data[15]]);
+    let length = ogg::find_last_granule(data, serial)
+        .map(|g| if g > 0 && sample_rate > 0 { g as f64 / sample_rate as f64 } else { 0.0 })
+        .unwrap_or(0.0);
+    let dict_ptr = dict.as_ptr();
+    unsafe {
+        set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), length);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), sample_rate);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), channels as u32);
+    }
+    Ok(true)
+}
+
+/// MP3 info only: parse MPEG frame header, skip ID3 tags.
+#[inline(always)]
+fn fast_info_mp3<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) -> PyResult<bool> {
+    let file_size = data.len() as u64;
+    let audio_start = if data.len() >= 10 {
+        match id3::header::ID3Header::parse(&data[0..10], 0) {
+            Ok(h) => {
+                let tag_size = h.size as usize;
+                if 10 + tag_size <= data.len() { h.full_size() as usize } else { 0 }
+            }
+            Err(_) => 0,
+        }
+    } else { 0 };
+    let audio_end = data.len().min(audio_start + 8192);
+    let audio_data = if audio_start < data.len() { &data[audio_start..audio_end] } else { &[] };
+    let info = match mp3::MPEGInfo::parse(audio_data, 0, file_size.saturating_sub(audio_start as u64)) {
+        Ok(i) => i,
+        Err(_) => return Ok(false),
+    };
+    let dict_ptr = dict.as_ptr();
+    unsafe {
+        set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), info.length);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), info.sample_rate);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), info.channels);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "bitrate").as_ptr(), info.bitrate);
+    }
+    Ok(true)
+}
+
+/// MP4 info only: parse moov/mvhd + audio track, skip ilst tags.
+#[inline(always)]
+fn fast_info_mp4<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) -> PyResult<bool> {
+    use mp4::atom::AtomIter;
+    let moov = match AtomIter::new(data, 0, data.len()).find_name(b"moov") {
+        Some(a) => a,
+        None => return Ok(false),
+    };
+    let moov_s = moov.data_offset;
+    let moov_e = moov_s + moov.data_size;
+    let mut duration = 0u64;
+    let mut timescale = 1000u32;
+    if let Some(mvhd) = AtomIter::new(data, moov_s, moov_e).find_name(b"mvhd") {
+        let d = &data[mvhd.data_offset..mvhd.data_offset + mvhd.data_size.min(32)];
+        if !d.is_empty() {
+            let version = d[0];
+            if version == 0 && d.len() >= 20 {
+                timescale = u32::from_be_bytes([d[12], d[13], d[14], d[15]]);
+                duration = u32::from_be_bytes([d[16], d[17], d[18], d[19]]) as u64;
+            } else if version == 1 && d.len() >= 32 {
+                timescale = u32::from_be_bytes([d[20], d[21], d[22], d[23]]);
+                duration = u64::from_be_bytes([d[24], d[25], d[26], d[27], d[28], d[29], d[30], d[31]]);
+            }
+        }
+    }
+    let length = if timescale > 0 { duration as f64 / timescale as f64 } else { 0.0 };
+    let mut channels = 2u32;
+    let mut sample_rate = 44100u32;
+    'trak: for trak in AtomIter::new(data, moov_s, moov_e) {
+        if trak.name != *b"trak" { continue; }
+        let ts = trak.data_offset;
+        let te = ts + trak.data_size;
+        let mdia = match AtomIter::new(data, ts, te).find_name(b"mdia") { Some(a) => a, None => continue };
+        let ms = mdia.data_offset;
+        let me = ms + mdia.data_size;
+        let is_audio = AtomIter::new(data, ms, me).any(|a| {
+            a.name == *b"hdlr" && {
+                let d = &data[a.data_offset..a.data_offset + a.data_size.min(12)];
+                d.len() >= 12 && &d[8..12] == b"soun"
+            }
+        });
+        if !is_audio { continue; }
+        let minf = match AtomIter::new(data, ms, me).find_name(b"minf") { Some(a) => a, None => continue };
+        let stbl = match AtomIter::new(data, minf.data_offset, minf.data_offset + minf.data_size).find_name(b"stbl") { Some(a) => a, None => continue };
+        let stsd = match AtomIter::new(data, stbl.data_offset, stbl.data_offset + stbl.data_size).find_name(b"stsd") { Some(a) => a, None => continue };
+        let stsd_data = &data[stsd.data_offset..stsd.data_offset + stsd.data_size];
+        if stsd_data.len() >= 16 {
+            let entry = &stsd_data[8..];
+            if entry.len() >= 36 {
+                let audio = &entry[8..];
+                if audio.len() >= 20 {
+                    channels = u16::from_be_bytes([audio[16], audio[17]]) as u32;
+                    if audio.len() >= 28 { sample_rate = u16::from_be_bytes([audio[24], audio[25]]) as u32; }
+                }
+            }
+        }
+        break 'trak;
+    }
+    let dict_ptr = dict.as_ptr();
+    unsafe {
+        set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), length);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), sample_rate);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), channels);
+    }
+    Ok(true)
+}
+
+/// Fast info-only read: returns dict with audio info (no tags).
+/// Selective parsing — skips tag structures entirely for maximum speed.
+#[pyfunction]
+fn _fast_info(py: Python<'_>, filename: &str) -> PyResult<PyObject> {
+    let data = read_cached(filename)
+        .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+    let dict = PyDict::new(py);
+    let ext = filename.rsplit('.').next().unwrap_or("");
+    let ok = if ext.eq_ignore_ascii_case("flac") {
+        fast_info_flac(py, &data, &dict)?
+    } else if ext.eq_ignore_ascii_case("ogg") {
+        fast_info_ogg(py, &data, &dict)?
+    } else if ext.eq_ignore_ascii_case("mp3") {
+        fast_info_mp3(py, &data, &dict)?
+    } else if ext.eq_ignore_ascii_case("m4a") || ext.eq_ignore_ascii_case("m4b")
+            || ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("m4v") {
+        fast_info_mp4(py, &data, &dict)?
+    } else {
+        false
+    };
+    if !ok {
+        return Err(PyValueError::new_err(format!("Unable to parse: {}", filename)));
+    }
+    Ok(dict.into_any().unbind())
+}
+
 /// Fast single-file read: direct-to-PyDict, bypassing PreSerializedFile.
 /// No result caching — parses fresh every call.
 #[pyfunction]
@@ -2896,6 +3084,7 @@ fn mutagen_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_cache, m)?)?;
     m.add_function(wrap_pyfunction!(_rust_batch_open, m)?)?;
     m.add_function(wrap_pyfunction!(_fast_read, m)?)?;
+    m.add_function(wrap_pyfunction!(_fast_info, m)?)?;
     m.add_function(wrap_pyfunction!(_fast_read_seq, m)?)?;
 
     m.add("MutagenError", m.py().get_type::<common::error::MutagenPyError>())?;

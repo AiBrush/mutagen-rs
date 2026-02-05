@@ -27,6 +27,9 @@ from .mutagen_rs import (
     # Fast single-file read (returns dict, minimal PyO3 overhead)
     _fast_read,
 
+    # Fast info-only read (no tags, maximum speed)
+    _fast_info,
+
     # Fast sequential batch read (single Rust call, no parallelism)
     _fast_read_seq,
 
