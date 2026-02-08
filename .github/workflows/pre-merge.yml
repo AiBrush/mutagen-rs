@@ -1,0 +1,155 @@
+name: Pre-merge
+
+on:
+  # Runs when user clicks "Merge" (merge queue)
+  merge_group:
+  # Reports status on PRs (builds are skipped, only gate job runs)
+  pull_request:
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: pre-merge-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Python wheels: Linux ──────────────────────────────────────────
+  build-linux:
+    name: Build (Linux ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, x86, aarch64, armv7]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist -i 3.12
+          sccache: true
+          manylinux: auto
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Python wheels: macOS ──────────────────────────────────────────
+  build-macos:
+    name: Build (macOS ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Python wheels: Windows ────────────────────────────────────────
+  build-windows:
+    name: Build (Windows ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64, x86]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.target }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-windows-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Source distribution ───────────────────────────────────────────
+  build-sdist:
+    name: Build (sdist)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v5
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ── Rust crate verification ──────────────────────────────────────
+  build-crate:
+    name: Build (crate)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify crate packages
+        run: cargo package --list
+
+  # ── Gate: all builds must pass ───────────────────────────────────
+  pre-merge:
+    name: Pre-merge
+    needs: [build-linux, build-macos, build-windows, build-sdist, build-crate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "Builds will run when added to merge queue"
+            exit 0
+          fi
+          results=(
+            "${{ needs.build-linux.result }}"
+            "${{ needs.build-macos.result }}"
+            "${{ needs.build-windows.result }}"
+            "${{ needs.build-sdist.result }}"
+            "${{ needs.build-crate.result }}"
+          )
+          for r in "${results[@]}"; do
+            if [[ "$r" != "success" ]]; then
+              echo "Build failed: $r"
+              exit 1
+            fi
+          done
+          echo "All builds passed!"

@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 # Cancel in-progress runs for the same branch/PR
