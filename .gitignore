@@ -71,3 +71,6 @@ docs/_build/
 
 # Pyenv
 .python-version
+
+# Generated test files
+test_files/generated/
