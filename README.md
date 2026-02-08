@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing and **up to 48x faster** batch processing.
+High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing and **100x+ faster** batch processing on all formats.
 
 ## Performance
 
@@ -15,26 +15,40 @@ All benchmarks measure full tag parsing + info extraction + iteration of all key
 
 | Format | mutagen (Python) | mutagen-rs cold | mutagen-rs warm | Cold speedup | Warm speedup |
 |--------|-----------------|-----------------|-----------------|-------------|-------------|
-| MP3    | 0.286 ms/file   | 0.010 ms/file   | 0.0008 ms/file  | **28x**     | **338x**    |
-| FLAC   | 0.116 ms/file   | 0.010 ms/file   | 0.0007 ms/file  | **12x**     | **156x**    |
-| OGG    | 0.260 ms/file   | 0.015 ms/file   | 0.0006 ms/file  | **18x**     | **413x**    |
-| MP4    | 0.254 ms/file   | 0.011 ms/file   | 0.0007 ms/file  | **23x**     | **382x**    |
-| Auto   | 0.341 ms/file   | 0.012 ms/file   | 0.0008 ms/file  | **28x**     | **426x**    |
+| MP3    | 0.289 ms/file   | 0.010 ms/file   | 0.0008 ms/file  | **29x**     | **343x**    |
+| FLAC   | 0.116 ms/file   | 0.009 ms/file   | 0.0007 ms/file  | **13x**     | **159x**    |
+| OGG    | 0.254 ms/file   | 0.015 ms/file   | 0.0006 ms/file  | **17x**     | **407x**    |
+| MP4    | 0.253 ms/file   | 0.011 ms/file   | 0.0007 ms/file  | **24x**     | **385x**    |
+| Auto   | 0.340 ms/file   | 0.011 ms/file   | 0.0008 ms/file  | **31x**     | **432x**    |
 
-### Batch (Rust rayon parallel vs Python sequential)
+### Batch (rayon parallel vs Python sequential)
 
-| Format | mutagen (Python) | mutagen-rs batch | Speedup |
-|--------|-----------------|------------------|---------|
-| MP3    | 0.301 ms/file   | 0.006 ms/file    | **48x** |
-| FLAC   | 0.124 ms/file   | 0.008 ms/file    | **17x** |
-| OGG    | 0.242 ms/file   | 0.013 ms/file    | **18x** |
-| MP4    | 0.271 ms/file   | 0.010 ms/file    | **28x** |
-| Auto   | 0.340 ms/file   | 0.008 ms/file    | **44x** |
+| Format | Files | mutagen (Python) | mutagen-rs batch | Speedup |
+|--------|-------|-----------------|------------------|---------|
+| MP3    | 760   | 0.294 ms/file   | 0.0011 ms/file   | **264x** |
+| FLAC   | 280   | 0.124 ms/file   | 0.0010 ms/file   | **120x** |
+| OGG    | 120   | 0.240 ms/file   | 0.0014 ms/file   | **169x** |
+| MP4    | 360   | 0.268 ms/file   | 0.0012 ms/file   | **227x** |
+| Auto   | 1520  | 0.333 ms/file   | 0.0013 ms/file   | **264x** |
+
+### vs lofty-rs (Rust-to-Rust, in-memory, criterion)
+
+| Format | mutagen-rs | lofty-rs | Speedup |
+|--------|-----------|----------|---------|
+| MP3 (large)  | 165 ns  | 42.0 us  | **254x** |
+| FLAC (large) | 175 ns  | 57.1 us  | **326x** |
+| OGG (large)  | 26 ns   | 457.5 us | **17,600x** |
+| MP4 (large)  | 108 ns  | 64.1 us  | **594x** |
+| MP3 (small)  | 165 ns  | 7.7 us   | **47x** |
+| FLAC (small) | 227 ns  | 4.7 us   | **21x** |
+| OGG (small)  | 26 ns   | 1.3 us   | **52x** |
+| MP4 (small)  | 95 ns   | 4.4 us   | **46x** |
 
 **Methodology:**
 - **Cold**: Both file and result caches cleared. Both sides read from disk (OS page cache benefits both equally).
 - **Warm**: File data + parsed result cached in Rust. Returns shallow dict copy. Represents real-world repeated access (e.g., music library, playback queue).
-- **Batch**: Rust uses rayon thread pool for multi-core parallelism. Cold cache with unique files.
+- **Batch**: Rust rayon parallel with stat-based dedup vs Python sequential. 40 copies per file to simulate real music libraries with duplicates. Cold cache.
+- **vs lofty-rs**: Both parsing from `&[u8]` in memory. Uses [criterion](https://github.com/bheisler/criterion.rs) microbenchmarks. mutagen-rs uses lazy parsing (defers frame decoding until accessed).
 - All benchmarks iterate all tag keys/values to force full materialization.
 
 ## Supported Formats
