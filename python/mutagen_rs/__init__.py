@@ -118,7 +118,7 @@ class _CachedFile(dict):
         elif ext == 'ogg':
             native = _RustOggVorbis(self.filename)
         elif ext in ('m4a', 'mp4', 'aac'):
-            raise NotImplementedError("MP4 write not yet implemented")
+            native = _RustMP4(self.filename)
         else:
             raise NotImplementedError(f"Save not supported for .{ext}")
         # Apply all tags (including user-modified keys) to native object
@@ -129,6 +129,28 @@ class _CachedFile(dict):
         native.save(*args, **kwargs)
         _cache.pop(self.filename, None)
         _rust_clear_cache()  # Invalidate Rust file/result caches so re-reads see new data
+
+    def _get_native(self):
+        """Get or create a native Rust object for mutation operations."""
+        if self._native is not None:
+            return self._native
+        ext = self.filename.rsplit('.', 1)[-1].lower()
+        if ext == 'mp3':
+            return _RustMP3(self.filename)
+        elif ext == 'flac':
+            return _RustFLAC(self.filename)
+        elif ext == 'ogg':
+            return _RustOggVorbis(self.filename)
+        elif ext in ('m4a', 'mp4', 'aac'):
+            return _RustMP4(self.filename)
+        raise NotImplementedError(f"Not supported for .{ext}")
+
+    def delete(self):
+        """Delete all tags from the file."""
+        native = self._get_native()
+        native.delete()
+        _cache.pop(self.filename, None)
+        _rust_clear_cache()
 
     def pprint(self):
         if self._native is not None:

@@ -95,6 +95,30 @@ impl MP4Tags {
     pub fn contains_key(&self, key: &str) -> bool {
         self.items.iter().any(|(k, _)| k == key)
     }
+
+    /// Set a tag value, replacing existing or inserting new.
+    pub fn set(&mut self, key: &str, value: MP4TagValue) {
+        if let Some((_, v)) = self.items.iter_mut().find(|(k, _)| k == key) {
+            *v = value;
+        } else {
+            self.items.push((key.to_string(), value));
+        }
+    }
+
+    /// Remove a tag by key.
+    pub fn delete(&mut self, key: &str) {
+        self.items.retain(|(k, _)| k != key);
+    }
+
+    /// Render all tags as an ilst atom.
+    pub fn render_ilst(&self) -> Vec<u8> {
+        let mut ilst_data = Vec::new();
+        for (key, value) in &self.items {
+            let item_data = render_tag_item(key, value);
+            ilst_data.extend_from_slice(&item_data);
+        }
+        make_atom(b"ilst", &ilst_data)
+    }
 }
 
 /// Complete MP4 file handler.
@@ -153,8 +177,15 @@ impl MP4File {
         }
     }
 
+    /// Save tags back to the file.
     pub fn save(&self) -> Result<()> {
-        Err(MutagenError::MP4("MP4 write not yet implemented".into()))
+        save_mp4_tags(&self.path, &self.tags)
+    }
+
+    /// Delete all tags from the file.
+    pub fn delete_tags(&self) -> Result<()> {
+        let empty = MP4Tags::new();
+        save_mp4_tags(&self.path, &empty)
     }
 
     pub fn score(path: &str, data: &[u8]) -> u32 {
@@ -475,5 +506,361 @@ fn merge_mp4_values(existing: &mut MP4TagValue, new: MP4TagValue) {
         (MP4TagValue::FreeForm(ref mut v), MP4TagValue::FreeForm(new_v)) => v.extend(new_v),
         (MP4TagValue::IntPair(ref mut v), MP4TagValue::IntPair(new_v)) => v.extend(new_v),
         _ => {}
+    }
+}
+
+// ────────────────────────────────────────────────────────
+// MP4 Write Support
+// ────────────────────────────────────────────────────────
+
+/// Build a raw atom: [size(4)][name(4)][data].
+fn make_atom(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let size = (8 + data.len()) as u32;
+    let mut buf = Vec::with_capacity(size as usize);
+    buf.extend_from_slice(&size.to_be_bytes());
+    buf.extend_from_slice(name);
+    buf.extend_from_slice(data);
+    buf
+}
+
+/// Build a data atom with type indicator and locale (0).
+fn make_data_atom(type_indicator: u32, payload: &[u8]) -> Vec<u8> {
+    // data atom: [size][name="data"][type(4)][locale(4)][payload]
+    let data_size = (8 + 4 + 4 + payload.len()) as u32;
+    let mut buf = Vec::with_capacity(data_size as usize);
+    buf.extend_from_slice(&data_size.to_be_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&type_indicator.to_be_bytes());
+    buf.extend_from_slice(&[0u8; 4]); // locale
+    buf.extend_from_slice(payload);
+    buf
+}
+
+/// Convert a key string to a 4-byte atom name.
+fn key_to_atom_name(key: &str) -> [u8; 4] {
+    let bytes = key.as_bytes();
+    // Handle \u{00a9}xxx keys (© symbol = 0xC2 0xA9 in UTF-8)
+    if bytes.len() >= 3 && bytes[0] == 0xC2 && bytes[1] == 0xA9 {
+        let rest = &key[2..]; // skip the © character
+        let rb = rest.as_bytes();
+        let mut name = [0xa9, 0, 0, 0];
+        for (i, &b) in rb.iter().take(3).enumerate() {
+            name[i + 1] = b;
+        }
+        return name;
+    }
+    // Standard 4-byte names
+    let mut name = [0u8; 4];
+    for (i, &b) in bytes.iter().take(4).enumerate() {
+        name[i] = b;
+    }
+    name
+}
+
+/// Render a single tag item as an atom (item_atom wrapping data atoms).
+fn render_tag_item(key: &str, value: &MP4TagValue) -> Vec<u8> {
+    // Freeform (----) atoms have a special structure
+    if key.starts_with("----:") {
+        return render_freeform_item(key, value);
+    }
+
+    let atom_name = key_to_atom_name(key);
+    let data_atoms = render_data_atoms(key, value);
+    make_atom(&atom_name, &data_atoms)
+}
+
+/// Render data atoms for a tag value.
+fn render_data_atoms(_key: &str, value: &MP4TagValue) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match value {
+        MP4TagValue::Text(texts) => {
+            for text in texts {
+                buf.extend_from_slice(&make_data_atom(1, text.as_bytes()));
+            }
+        }
+        MP4TagValue::Integer(ints) => {
+            for &val in ints {
+                // Use the smallest representation that fits
+                let payload = if val >= i8::MIN as i64 && val <= i8::MAX as i64 {
+                    vec![val as u8]
+                } else if val >= i16::MIN as i64 && val <= i16::MAX as i64 {
+                    (val as i16).to_be_bytes().to_vec()
+                } else if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+                    (val as i32).to_be_bytes().to_vec()
+                } else {
+                    val.to_be_bytes().to_vec()
+                };
+                buf.extend_from_slice(&make_data_atom(21, &payload));
+            }
+        }
+        MP4TagValue::IntPair(pairs) => {
+            for &(a, b) in pairs {
+                // trkn/disk format: 2 bytes padding + 2 bytes num + 2 bytes total + 2 bytes padding
+                let mut payload = vec![0u8; 8];
+                payload[2..4].copy_from_slice(&(a as i16).to_be_bytes());
+                payload[4..6].copy_from_slice(&(b as i16).to_be_bytes());
+                buf.extend_from_slice(&make_data_atom(0, &payload));
+            }
+        }
+        MP4TagValue::Bool(val) => {
+            buf.extend_from_slice(&make_data_atom(21, &[if *val { 1 } else { 0 }]));
+        }
+        MP4TagValue::Cover(covers) => {
+            for cover in covers {
+                let type_ind = cover.format as u32;
+                buf.extend_from_slice(&make_data_atom(type_ind, &cover.data));
+            }
+        }
+        MP4TagValue::FreeForm(forms) => {
+            for form in forms {
+                buf.extend_from_slice(&make_data_atom(form.dataformat, &form.data));
+            }
+        }
+        MP4TagValue::Data(d) => {
+            buf.extend_from_slice(&make_data_atom(0, d));
+        }
+    }
+    buf
+}
+
+/// Render a freeform (----) atom with mean/name/data sub-atoms.
+fn render_freeform_item(key: &str, value: &MP4TagValue) -> Vec<u8> {
+    // Parse key: "----:com.apple.iTunes:NAME"
+    let parts: Vec<&str> = key.splitn(3, ':').collect();
+    let mean = if parts.len() > 1 { parts[1] } else { "com.apple.iTunes" };
+    let name = if parts.len() > 2 { parts[2] } else { "" };
+
+    let mut inner = Vec::new();
+
+    // mean atom: [size][name="mean"][version(4)][mean_string]
+    let mean_size = (8 + 4 + mean.len()) as u32;
+    inner.extend_from_slice(&mean_size.to_be_bytes());
+    inner.extend_from_slice(b"mean");
+    inner.extend_from_slice(&[0u8; 4]); // version/flags
+    inner.extend_from_slice(mean.as_bytes());
+
+    // name atom: [size][name="name"][version(4)][name_string]
+    let name_size = (8 + 4 + name.len()) as u32;
+    inner.extend_from_slice(&name_size.to_be_bytes());
+    inner.extend_from_slice(b"name");
+    inner.extend_from_slice(&[0u8; 4]); // version/flags
+    inner.extend_from_slice(name.as_bytes());
+
+    // data atoms
+    inner.extend_from_slice(&render_data_atoms(key, value));
+
+    make_atom(b"----", &inner)
+}
+
+/// Save MP4 tags to a file.
+///
+/// Strategy:
+/// 1. Read file, locate moov atom
+/// 2. Build new ilst from tags
+/// 3. Rebuild moov with new ilst (preserving non-tag atoms)
+/// 4. If moov size changed and moov is before mdat, fix stco/co64 offsets
+/// 5. Write output file
+pub fn save_mp4_tags(path: &str, tags: &MP4Tags) -> Result<()> {
+    let data = std::fs::read(path)?;
+
+    // Find moov atom
+    let moov = AtomIter::new(&data, 0, data.len())
+        .find_name(b"moov")
+        .ok_or_else(|| MutagenError::MP4("No moov atom found".into()))?;
+
+    let moov_start = moov.offset; // includes header
+    let moov_header_size = moov.header_size as usize;
+    let moov_body_start = moov.data_offset;
+    let moov_body_end = moov.data_offset + moov.data_size;
+
+    // Render new ilst
+    let new_ilst = tags.render_ilst();
+
+    // Rebuild moov body: keep all atoms except udta, then append new udta/meta/ilst
+    let mut new_moov_body = Vec::new();
+    let mut had_udta = false;
+
+    for atom in AtomIter::new(&data, moov_body_start, moov_body_end) {
+        if atom.name == *b"udta" {
+            had_udta = true;
+            // Rebuild udta: keep non-meta atoms, replace meta with new meta/ilst
+            let mut new_udta_body = Vec::new();
+            let mut had_meta = false;
+
+            for ua in AtomIter::new(&data, atom.data_offset, atom.data_offset + atom.data_size) {
+                if ua.name == *b"meta" {
+                    had_meta = true;
+                    // Rebuild meta: keep non-ilst atoms, insert new ilst
+                    let mut new_meta_body = Vec::with_capacity(4 + new_ilst.len());
+                    // meta has 4 bytes version/flags
+                    let meta_inner_start = ua.data_offset + 4;
+                    let meta_inner_end = ua.data_offset + ua.data_size;
+                    new_meta_body.extend_from_slice(&[0u8; 4]); // version/flags
+
+                    if meta_inner_start < meta_inner_end {
+                        // Copy non-ilst atoms from original meta
+                        for ma in AtomIter::new(&data, meta_inner_start, meta_inner_end) {
+                            if ma.name != *b"ilst" {
+                                let orig = &data[ma.offset..ma.offset + ma.size];
+                                new_meta_body.extend_from_slice(orig);
+                            }
+                        }
+                    }
+
+                    // Append new ilst (even if empty, to clear tags)
+                    if !new_ilst.is_empty() {
+                        new_meta_body.extend_from_slice(&new_ilst);
+                    }
+
+                    new_udta_body.extend_from_slice(&make_atom(b"meta", &new_meta_body));
+                } else {
+                    // Copy other udta children as-is
+                    let orig = &data[ua.offset..ua.offset + ua.size];
+                    new_udta_body.extend_from_slice(orig);
+                }
+            }
+
+            if !had_meta && !new_ilst.is_empty() {
+                // Create meta with version/flags + hdlr + ilst
+                let mut meta_body = Vec::new();
+                meta_body.extend_from_slice(&[0u8; 4]); // version/flags
+                // hdlr atom for meta
+                meta_body.extend_from_slice(&make_meta_hdlr());
+                meta_body.extend_from_slice(&new_ilst);
+                new_udta_body.extend_from_slice(&make_atom(b"meta", &meta_body));
+            }
+
+            new_moov_body.extend_from_slice(&make_atom(b"udta", &new_udta_body));
+        } else {
+            // Copy non-udta moov children as-is
+            let orig = &data[atom.offset..atom.offset + atom.size];
+            new_moov_body.extend_from_slice(orig);
+        }
+    }
+
+    if !had_udta && !new_ilst.is_empty() {
+        // Create udta/meta/ilst from scratch
+        let mut meta_body = Vec::new();
+        meta_body.extend_from_slice(&[0u8; 4]); // version/flags
+        meta_body.extend_from_slice(&make_meta_hdlr());
+        meta_body.extend_from_slice(&new_ilst);
+        let meta_atom = make_atom(b"meta", &meta_body);
+        new_moov_body.extend_from_slice(&make_atom(b"udta", &meta_atom));
+    }
+
+    // Build new moov atom
+    let new_moov = make_atom(b"moov", &new_moov_body);
+
+    // Calculate size delta for offset fixup
+    let old_moov_size = moov_header_size + moov.data_size;
+    let new_moov_size = new_moov.len();
+    let delta = new_moov_size as i64 - old_moov_size as i64;
+
+    // Apply stco/co64 fixup if moov is before mdat and size changed
+    let mut new_moov_fixed = new_moov;
+    if delta != 0 {
+        // Check if moov is before any mdat
+        let moov_before_mdat = AtomIter::new(&data, 0, data.len()).any(|a| {
+            a.name == *b"mdat" && a.offset > moov_start
+        });
+        if moov_before_mdat {
+            fix_chunk_offsets(&mut new_moov_fixed, delta);
+        }
+    }
+
+    // Assemble output: [before moov][new moov][after moov]
+    let moov_end = moov_start + old_moov_size;
+    let mut output = Vec::with_capacity(data.len().saturating_add_signed(delta as isize));
+    output.extend_from_slice(&data[..moov_start]);
+    output.extend_from_slice(&new_moov_fixed);
+    if moov_end < data.len() {
+        output.extend_from_slice(&data[moov_end..]);
+    }
+
+    std::fs::write(path, &output)?;
+    Ok(())
+}
+
+/// Create a minimal hdlr atom for the meta atom.
+fn make_meta_hdlr() -> Vec<u8> {
+    // hdlr: version/flags(4) + pre_defined(4) + handler_type(4) + reserved(12) + name(1)
+    let mut body = Vec::with_capacity(25);
+    body.extend_from_slice(&[0u8; 4]); // version/flags
+    body.extend_from_slice(&[0u8; 4]); // pre_defined
+    body.extend_from_slice(b"mdir");   // handler_type
+    body.extend_from_slice(b"appl");   // reserved[0]
+    body.extend_from_slice(&[0u8; 8]); // reserved[1..2]
+    body.push(0); // name (empty string with null terminator)
+    make_atom(b"hdlr", &body)
+}
+
+/// Fix stco and co64 chunk offsets within a moov atom buffer by delta.
+fn fix_chunk_offsets(moov_buf: &mut [u8], delta: i64) {
+    // moov_buf starts with the moov header (8 bytes), body follows
+    if moov_buf.len() < 8 {
+        return;
+    }
+    fix_chunk_offsets_in(moov_buf, 8, moov_buf.len(), delta);
+}
+
+/// Recursively scan for stco/co64 atoms and adjust offsets.
+fn fix_chunk_offsets_in(buf: &mut [u8], start: usize, end: usize, delta: i64) {
+    let mut pos = start;
+    while pos + 8 <= end {
+        let size = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
+        if size < 8 || pos + size > end {
+            break;
+        }
+        let name: [u8; 4] = [buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]];
+        let data_start = pos + 8;
+        let data_end = pos + size;
+
+        match &name {
+            b"stco" => {
+                // stco: version(1) + flags(3) + entry_count(4) + entries(4 each)
+                if data_end - data_start >= 8 {
+                    let count = u32::from_be_bytes([
+                        buf[data_start + 4], buf[data_start + 5],
+                        buf[data_start + 6], buf[data_start + 7],
+                    ]) as usize;
+                    let entries_start = data_start + 8;
+                    for i in 0..count {
+                        let off = entries_start + i * 4;
+                        if off + 4 > data_end { break; }
+                        let old = u32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+                        let new_val = (old as i64 + delta) as u32;
+                        buf[off..off + 4].copy_from_slice(&new_val.to_be_bytes());
+                    }
+                }
+            }
+            b"co64" => {
+                // co64: version(1) + flags(3) + entry_count(4) + entries(8 each)
+                if data_end - data_start >= 8 {
+                    let count = u32::from_be_bytes([
+                        buf[data_start + 4], buf[data_start + 5],
+                        buf[data_start + 6], buf[data_start + 7],
+                    ]) as usize;
+                    let entries_start = data_start + 8;
+                    for i in 0..count {
+                        let off = entries_start + i * 8;
+                        if off + 8 > data_end { break; }
+                        let old = u64::from_be_bytes([
+                            buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
+                            buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+                        ]);
+                        let new_val = (old as i64 + delta) as u64;
+                        buf[off..off + 8].copy_from_slice(&new_val.to_be_bytes());
+                    }
+                }
+            }
+            // Container atoms: recurse into children
+            b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts" | b"dinf" | b"traf" | b"moof" => {
+                fix_chunk_offsets_in(buf, data_start, data_end, delta);
+            }
+            _ => {}
+        }
+
+        pos += size;
+        if pos <= start { break; } // prevent infinite loop
     }
 }

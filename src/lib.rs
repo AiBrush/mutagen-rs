@@ -948,8 +948,52 @@ impl PyMP4 {
         }
     }
 
+    fn __setitem__(&mut self, py: Python, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let tag_value = py_to_mp4_value(key, value)?;
+        // Update cached Python dict
+        let py_val = mp4_value_to_py(py, &tag_value)?;
+        let _ = self.tag_dict.bind(py).set_item(key, py_val);
+        if !self.tag_keys.contains(&key.to_string()) {
+            self.tag_keys.push(key.to_string());
+        }
+        // Update underlying tag storage
+        self.mp4_tags.tags.set(key, tag_value);
+        Ok(())
+    }
+
+    fn __delitem__(&mut self, py: Python, key: &str) -> PyResult<()> {
+        let dict = self.tag_dict.bind(py);
+        if dict.get_item(key)?.is_none() {
+            return Err(PyKeyError::new_err(key.to_string()));
+        }
+        dict.del_item(key)?;
+        self.tag_keys.retain(|k| k != key);
+        self.mp4_tags.tags.delete(key);
+        Ok(())
+    }
+
     fn __contains__(&self, py: Python, key: &str) -> bool {
         self.tag_dict.bind(py).get_item(key).ok().flatten().is_some()
+    }
+
+    fn save(&self) -> PyResult<()> {
+        mp4::save_mp4_tags(&self.filename, &self.mp4_tags.tags)
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        // Invalidate file cache
+        if let Ok(mut cache) = get_file_cache().write() {
+            cache.remove(&self.filename);
+        }
+        Ok(())
+    }
+
+    fn delete(&self) -> PyResult<()> {
+        let empty = mp4::MP4Tags::new();
+        mp4::save_mp4_tags(&self.filename, &empty)
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        if let Ok(mut cache) = get_file_cache().write() {
+            cache.remove(&self.filename);
+        }
+        Ok(())
     }
 
     fn __repr__(&self) -> String {
@@ -1094,6 +1138,96 @@ fn mp4_value_to_py(py: Python, value: &mp4::MP4TagValue) -> PyResult<Py<PyAny>> 
             Ok(PyBytes::new(py, d).into_any().unbind())
         }
     }
+}
+
+/// Convert a Python value to an MP4TagValue based on the key and value type.
+fn py_to_mp4_value(key: &str, value: &Bound<'_, PyAny>) -> PyResult<mp4::MP4TagValue> {
+    // Cover art: list of bytes objects or list of dicts with data/format
+    if key == "covr" {
+        if let Ok(list) = value.cast::<PyList>() {
+            let mut covers = Vec::new();
+            for item in list.iter() {
+                // Try bytes first (most common: [b'\x89PNG...'])
+                if let Ok(data) = item.extract::<Vec<u8>>() {
+                    let fmt = if data.starts_with(b"\x89PNG") {
+                        mp4::MP4CoverFormat::PNG
+                    } else {
+                        mp4::MP4CoverFormat::JPEG
+                    };
+                    covers.push(mp4::MP4Cover { data, format: fmt });
+                } else if let Ok(dict) = item.cast::<PyDict>() {
+                    // Dict with data/format keys
+                    if let (Some(data_obj), Some(fmt_obj)) = (dict.get_item("data")?, dict.get_item("format")?) {
+                        let data = data_obj.extract::<Vec<u8>>()?;
+                        let fmt_int = fmt_obj.extract::<u32>().unwrap_or(13);
+                        let format = if fmt_int == 14 { mp4::MP4CoverFormat::PNG } else { mp4::MP4CoverFormat::JPEG };
+                        covers.push(mp4::MP4Cover { data, format });
+                    }
+                }
+            }
+            if !covers.is_empty() {
+                return Ok(mp4::MP4TagValue::Cover(covers));
+            }
+        }
+        // Single bytes object
+        if let Ok(data) = value.extract::<Vec<u8>>() {
+            let fmt = if data.starts_with(b"\x89PNG") {
+                mp4::MP4CoverFormat::PNG
+            } else {
+                mp4::MP4CoverFormat::JPEG
+            };
+            return Ok(mp4::MP4TagValue::Cover(vec![mp4::MP4Cover { data, format: fmt }]));
+        }
+    }
+    // Int pairs (trkn, disk): [(num, total)]
+    if key == "trkn" || key == "disk" {
+        if let Ok(pairs) = value.extract::<Vec<(i32, i32)>>() {
+            return Ok(mp4::MP4TagValue::IntPair(pairs));
+        }
+        if let Ok(pair) = value.extract::<(i32, i32)>() {
+            return Ok(mp4::MP4TagValue::IntPair(vec![pair]));
+        }
+    }
+    // List of strings (most common for text tags)
+    if let Ok(strings) = value.extract::<Vec<String>>() {
+        return Ok(mp4::MP4TagValue::Text(strings));
+    }
+    // Single string
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(mp4::MP4TagValue::Text(vec![s]));
+    }
+    // Bool (check before int since bool extracts as int too)
+    if let Ok(b) = value.extract::<bool>() {
+        return Ok(mp4::MP4TagValue::Bool(b));
+    }
+    // Integer
+    if let Ok(i) = value.extract::<i64>() {
+        return Ok(mp4::MP4TagValue::Integer(vec![i]));
+    }
+    // List of integers
+    if let Ok(ints) = value.extract::<Vec<i64>>() {
+        return Ok(mp4::MP4TagValue::Integer(ints));
+    }
+    // Raw bytes
+    if let Ok(data) = value.extract::<Vec<u8>>() {
+        return Ok(mp4::MP4TagValue::Data(data));
+    }
+    // Freeform: list of bytes
+    if let Ok(list) = value.cast::<PyList>() {
+        let mut forms = Vec::new();
+        for item in list.iter() {
+            if let Ok(data) = item.extract::<Vec<u8>>() {
+                forms.push(mp4::MP4FreeForm { data, dataformat: 1 });
+            }
+        }
+        if !forms.is_empty() {
+            return Ok(mp4::MP4TagValue::FreeForm(forms));
+        }
+    }
+
+    Err(PyValueError::new_err(format!(
+        "Cannot convert value for MP4 key '{}': unsupported type", key
+    )))
 }
 
 // ---- Batch API ----
