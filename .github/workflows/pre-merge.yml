@@ -1,0 +1,134 @@
+name: Pre-merge
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: pre-merge-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Python wheels: Linux ──────────────────────────────────────────
+  build-linux:
+    name: Build (Linux ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, x86, aarch64, armv7]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+          manylinux: auto
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Python wheels: macOS ──────────────────────────────────────────
+  build-macos:
+    name: Build (macOS ${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Python wheels: Windows ────────────────────────────────────────
+  build-windows:
+    name: Build (Windows ${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64, x86]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.target }}
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          sccache: true
+      - name: Upload wheel
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-windows-${{ matrix.target }}
+          path: dist/*.whl
+
+  # ── Source distribution ───────────────────────────────────────────
+  build-sdist:
+    name: Build (sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v5
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ── Rust crate verification ──────────────────────────────────────
+  build-crate:
+    name: Build (crate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify crate packages
+        run: cargo package --list
+
+  # ── Gate: all builds must pass ───────────────────────────────────
+  pre-merge:
+    name: Pre-merge
+    needs: [build-linux, build-macos, build-windows, build-sdist, build-crate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: All builds must pass
+        if: >-
+          needs.build-linux.result != 'success' ||
+          needs.build-macos.result != 'success' ||
+          needs.build-windows.result != 'success' ||
+          needs.build-sdist.result != 'success' ||
+          needs.build-crate.result != 'success'
+        run: exit 1
