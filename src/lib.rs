@@ -6,10 +6,6 @@ pub mod ogg;
 pub mod mp4;
 pub mod vorbis;
 
-#[cfg(target_arch = "x86_64")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 use std::sync::{Arc, RwLock, OnceLock};
 use std::collections::HashMap;
 
