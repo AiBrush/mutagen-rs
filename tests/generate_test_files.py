@@ -6,18 +6,14 @@ that records the expected metadata for verification.
 """
 import json
 import os
-import struct
-import sys
 
-# Use original mutagen for generation
-import mutagen
 from mutagen.id3 import (
-    ID3, TIT2, TPE1, TALB, TRCK, TDRC, TCON, TXXX, COMM, USLT,
-    POPM, APIC,
+    ID3, TIT2, TPE1, TALB, TRCK, TDRC, TCON, TXXX, COMM,
+    POPM,
 )
 from mutagen.flac import FLAC, Picture
 from mutagen.oggvorbis import OggVorbis
-from mutagen.mp4 import MP4, MP4Cover
+from mutagen.mp4 import MP4
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)

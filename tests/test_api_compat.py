@@ -715,7 +715,6 @@ class TestGeneratedFiles:
         if mp3_gen not in self.truth:
             pytest.skip(f"No truth for {mp3_gen}")
         path = self._get_gen_path(mp3_gen)
-        expected = self.truth[mp3_gen]["tag_count"]
         # Compare against mutagen as ground truth
         m = mutagen.File(path)
         m_count = len(m.keys()) if m and m.tags else 0
@@ -748,7 +747,6 @@ class TestGeneratedFiles:
             pytest.skip("No truth for flac_basic")
         path = self._get_gen_path(name)
         expected = self.truth[name]
-        m = mutagen.File(path)
         r = mutagen_rs._fast_read(path)
         r_keys = set(r.get("_keys", []))
         for key in expected["tags"]:
@@ -788,7 +786,6 @@ class TestGeneratedFiles:
         if name not in self.truth:
             pytest.skip("No truth for m4a_basic")
         path = self._get_gen_path(name)
-        expected = self.truth[name]
         m = mutagen.File(path)
         r = mutagen_rs._fast_read(path)
         m_count = len(m.keys()) if m and m.tags else 0
