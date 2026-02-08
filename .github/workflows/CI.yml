@@ -28,7 +28,9 @@ jobs:
         run: |
           pip install maturin mutagen pytest
       - name: Build and install
-        run: maturin develop --release
+        run: |
+          maturin build --release --out dist
+          pip install dist/*.whl
       - name: Run tests
         run: python -m pytest tests/test_api_compat.py -v
 

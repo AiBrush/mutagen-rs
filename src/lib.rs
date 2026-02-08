@@ -1653,8 +1653,7 @@ unsafe fn parse_vc_to_ffi_dict(data: &[u8], tags_dict: *mut pyo3::ffi::PyObject)
     }
 }
 
-/// JSON-escape a string value for safe embedding in JSON.
-/// Fast path: if string has no special characters, avoid per-char scanning.
+#[allow(dead_code)]
 #[inline(always)]
 fn json_escape_to(s: &str, out: &mut String) {
     out.push('"');
@@ -1681,6 +1680,7 @@ fn json_escape_to(s: &str, out: &mut String) {
 }
 
 /// Serialize a BatchTagValue to a JSON fragment.
+#[allow(dead_code)]
 #[inline(always)]
 fn batch_value_to_json(bv: &BatchTagValue, out: &mut String) {
     match bv {
@@ -1728,6 +1728,7 @@ fn batch_value_to_json(bv: &BatchTagValue, out: &mut String) {
 }
 
 /// Write an integer to a string using itoa (faster than format!).
+#[allow(dead_code)]
 #[inline(always)]
 fn write_int(out: &mut String, v: impl itoa::Integer) {
     let mut buf = itoa::Buffer::new();
@@ -1735,6 +1736,7 @@ fn write_int(out: &mut String, v: impl itoa::Integer) {
 }
 
 /// Write a float to a string using ryu (faster than format!).
+#[allow(dead_code)]
 #[inline(always)]
 fn write_float(out: &mut String, v: f64) {
     let mut buf = ryu::Buffer::new();
@@ -1742,6 +1744,7 @@ fn write_float(out: &mut String, v: f64) {
 }
 
 /// Serialize a PreSerializedFile to a JSON object string.
+#[allow(dead_code)]
 #[inline(always)]
 fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
     out.push_str("{\"length\":");
@@ -1830,26 +1833,12 @@ impl PyBatchResult {
     }
 }
 
-/// Batch open: read and parse multiple files in parallel using rayon.
-/// Returns a native Python dict (path → metadata dict) for zero-overhead iteration.
-/// Uses content-based dedup + dict sharing for duplicate files.
-///
-/// For large files (>32KB), uses mmap to avoid reading unused audio data.
-/// Dedup cache entry: Parsing sentinel prevents duplicate work across rayon threads.
-enum DedupEntry {
-    /// Another thread is parsing this file — wait for result.
-    Parsing,
-    /// Parsed result ready for sharing.
-    Done(Arc<PreSerializedFile>),
-}
-
-#[pyfunction]
-fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
+/// Batch I/O helper (Unix): uses fstatat/openat/pread for maximum performance.
+#[cfg(unix)]
+fn batch_open_io(filenames: &[String], exts: &[&str]) -> Vec<(usize, Arc<PreSerializedFile>)> {
     use rayon::prelude::*;
-
-    let exts: Vec<&str> = filenames.iter()
-        .map(|p| p.rsplit('.').next().unwrap_or(""))
-        .collect();
+    let n = filenames.len();
+    if n == 0 { return Vec::new(); }
 
     // Check if all files share the same directory — use openat for faster opens.
     let common_dir = if !filenames.is_empty() {
@@ -1861,8 +1850,6 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
         } else { None }
     } else { None };
 
-    // Pre-compute CStrings: if same dir, compute relative names + dir fd.
-    // Otherwise, compute full paths.
     let (c_names, dir_fd): (Vec<std::ffi::CString>, i32) = if let Some(ref dir) = common_dir {
         let names: Vec<std::ffi::CString> = filenames.iter()
             .map(|p| {
@@ -1880,10 +1867,14 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
         (paths, -1)
     };
 
-    // Helper: open a file (openat if dir_fd available, else open)
+    #[cfg(target_os = "linux")]
+    let noatime_flag: libc::c_int = libc::O_NOATIME;
+    #[cfg(not(target_os = "linux"))]
+    let noatime_flag: libc::c_int = 0;
+
     let open_file = |i: usize| -> i32 {
         unsafe {
-            let flags = libc::O_RDONLY | libc::O_NOATIME;
+            let flags = libc::O_RDONLY | noatime_flag;
             let f = if dir_fd >= 0 {
                 libc::openat(dir_fd, c_names[i].as_ptr(), flags)
             } else {
@@ -1897,92 +1888,70 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
         }
     };
 
-    let file_indices: Vec<(usize, Arc<PreSerializedFile>)> = py.detach(|| {
-        use rayon::prelude::*;
-        let n = filenames.len();
-        if n == 0 { return Vec::new(); }
+    // Phase 1: Parallel fstatat — get file sizes without opening files.
+    let sizes: Vec<i64> = (0..n).into_par_iter()
+        .map(|i| {
+            let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                if dir_fd >= 0 {
+                    libc::fstatat(dir_fd, c_names[i].as_ptr(), &mut stat_buf, 0)
+                } else {
+                    libc::stat(c_names[i].as_ptr(), &mut stat_buf)
+                }
+            };
+            if rc == 0 { stat_buf.st_size } else { -1 }
+        })
+        .collect();
 
-        // Phase 1: Parallel fstatat — get file sizes without opening files.
-        // On tmpfs, fstatat (~1.5μs) is much cheaper than open (~2μs) + close (~0.3μs).
-        let sizes: Vec<i64> = (0..n).into_par_iter()
-            .map(|i| {
-                let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
-                let rc = unsafe {
-                    if dir_fd >= 0 {
-                        libc::fstatat(dir_fd, c_names[i].as_ptr(), &mut stat_buf, 0)
-                    } else {
-                        libc::stat(c_names[i].as_ptr(), &mut stat_buf)
-                    }
-                };
-                if rc == 0 { stat_buf.st_size } else { -1 }
-            })
-            .collect();
-
-        // Phase 2: Group by (file_size, extension) using sort (faster than HashMap).
-        // Pre-compute a u64 key: (size << 4) | ext_id. Collision-free for files < 2^60.
-        let mut sorted_indices: Vec<(u64, usize)> = Vec::with_capacity(n);
-        for i in 0..n {
-            if sizes[i] >= 0 {
-                let ext_id: u64 = match exts[i].as_bytes() {
-                    b"mp3" | b"MP3" => 1,
-                    b"flac" | b"FLAC" => 2,
-                    b"ogg" | b"OGG" => 3,
-                    b"mp4" | b"MP4" | b"m4a" | b"M4A" | b"m4b" | b"M4B" => 4,
-                    _ => 0,
-                };
-                sorted_indices.push(((sizes[i] as u64) << 4 | ext_id, i));
-            }
+    // Phase 2: Group by (file_size, extension) using sort (faster than HashMap).
+    let mut sorted_indices: Vec<(u64, usize)> = Vec::with_capacity(n);
+    for i in 0..n {
+        if sizes[i] >= 0 {
+            let ext_id: u64 = match exts[i].as_bytes() {
+                b"mp3" | b"MP3" => 1,
+                b"flac" | b"FLAC" => 2,
+                b"ogg" | b"OGG" => 3,
+                b"mp4" | b"MP4" | b"m4a" | b"M4A" | b"m4b" | b"M4B" => 4,
+                _ => 0,
+            };
+            sorted_indices.push(((sizes[i] as u64) << 4 | ext_id, i));
         }
-        sorted_indices.sort_unstable_by_key(|&(k, _)| k);
+    }
+    sorted_indices.sort_unstable_by_key(|&(k, _)| k);
 
-        // Find group representatives (first index of each contiguous run).
-        let mut reps: Vec<usize> = Vec::new();
-        let mut group_bounds: Vec<usize> = Vec::new();
-        {
-            let mut i = 0;
-            while i < sorted_indices.len() {
-                let key = sorted_indices[i].0;
-                reps.push(sorted_indices[i].1);
-                group_bounds.push(i);
-                while i < sorted_indices.len() && sorted_indices[i].0 == key { i += 1; }
-            }
-            group_bounds.push(sorted_indices.len()); // sentinel
+    let mut reps: Vec<usize> = Vec::new();
+    let mut group_bounds: Vec<usize> = Vec::new();
+    {
+        let mut i = 0;
+        while i < sorted_indices.len() {
+            let key = sorted_indices[i].0;
+            reps.push(sorted_indices[i].1);
+            group_bounds.push(i);
+            while i < sorted_indices.len() && sorted_indices[i].0 == key { i += 1; }
         }
+        group_bounds.push(sorted_indices.len());
+    }
 
-        // Phase 3: Parse representatives in parallel.
-        let parsed: HashMap<usize, Arc<PreSerializedFile>> = reps.par_iter().copied()
-            .filter_map(|i| {
-                let fd = open_file(i);
-                if fd < 0 { return None; }
-                let file_len = sizes[i] as usize;
-                let ext = exts[i];
+    // Phase 3: Parse representatives in parallel (FLAC uses 4KB prefix with kept-open fd).
+    let parsed: HashMap<usize, Arc<PreSerializedFile>> = reps.par_iter().copied()
+        .filter_map(|i| {
+            let fd = open_file(i);
+            if fd < 0 { return None; }
+            let file_len = sizes[i] as usize;
+            let ext = exts[i];
 
-                // Parse from open fd: FLAC uses 4KB prefix first, others read full.
-                // Keeps fd open for potential second read (avoids re-open syscall).
-                let pf = if ext.eq_ignore_ascii_case("flac") && file_len > 4096 {
-                    let mut buf = vec![0u8; 4096];
-                    let nr = unsafe {
-                        libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 4096, 0)
-                    };
-                    if nr <= 0 { unsafe { libc::close(fd); } return None; }
-                    buf.truncate(nr as usize);
-                    if let Some(pf) = parse_flac_batch(&buf) {
-                        if pf.lazy_vc.is_some() {
-                            unsafe { libc::close(fd); }
-                            Some(pf)
-                        } else {
-                            // Need full file — pread from still-open fd (no re-open!)
-                            let mut data = vec![0u8; file_len];
-                            let nr2 = unsafe {
-                                libc::pread(fd, data.as_mut_ptr() as *mut libc::c_void, file_len, 0)
-                            };
-                            unsafe { libc::close(fd); }
-                            if nr2 <= 0 { return None; }
-                            data.truncate(nr2 as usize);
-                            parse_flac_batch(&data)
-                        }
+            let pf = if ext.eq_ignore_ascii_case("flac") && file_len > 4096 {
+                let mut buf = vec![0u8; 4096];
+                let nr = unsafe {
+                    libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 4096, 0)
+                };
+                if nr <= 0 { unsafe { libc::close(fd); } return None; }
+                buf.truncate(nr as usize);
+                if let Some(pf) = parse_flac_batch(&buf) {
+                    if pf.lazy_vc.is_some() {
+                        unsafe { libc::close(fd); }
+                        Some(pf)
                     } else {
-                        // Parse failed from prefix, read full via same fd
                         let mut data = vec![0u8; file_len];
                         let nr2 = unsafe {
                             libc::pread(fd, data.as_mut_ptr() as *mut libc::c_void, file_len, 0)
@@ -1994,34 +1963,138 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
                     }
                 } else {
                     let mut data = vec![0u8; file_len];
-                    let nr = unsafe {
+                    let nr2 = unsafe {
                         libc::pread(fd, data.as_mut_ptr() as *mut libc::c_void, file_len, 0)
                     };
                     unsafe { libc::close(fd); }
-                    if nr <= 0 { return None; }
-                    data.truncate(nr as usize);
-                    parse_and_serialize(&data, &filenames[i])
-                }?;
-
-                Some((i, Arc::new(pf)))
-            })
-            .collect();
-
-        // Phase 4: Assign — each file gets its group representative's parsed result.
-        let mut results: Vec<(usize, Arc<PreSerializedFile>)> = Vec::with_capacity(n);
-        for (g, &rep) in reps.iter().enumerate() {
-            if let Some(pf) = parsed.get(&rep) {
-                for j in group_bounds[g]..group_bounds[g + 1] {
-                    results.push((sorted_indices[j].1, Arc::clone(pf)));
+                    if nr2 <= 0 { return None; }
+                    data.truncate(nr2 as usize);
+                    parse_flac_batch(&data)
                 }
+            } else {
+                let mut data = vec![0u8; file_len];
+                let nr = unsafe {
+                    libc::pread(fd, data.as_mut_ptr() as *mut libc::c_void, file_len, 0)
+                };
+                unsafe { libc::close(fd); }
+                if nr <= 0 { return None; }
+                data.truncate(nr as usize);
+                parse_and_serialize(&data, &filenames[i])
+            }?;
+
+            Some((i, Arc::new(pf)))
+        })
+        .collect();
+
+    // Close directory fd
+    if dir_fd >= 0 { unsafe { libc::close(dir_fd); } }
+
+    // Phase 4: Assign — each file gets its group representative's parsed result.
+    let mut results: Vec<(usize, Arc<PreSerializedFile>)> = Vec::with_capacity(n);
+    for (g, &rep) in reps.iter().enumerate() {
+        if let Some(pf) = parsed.get(&rep) {
+            for j in group_bounds[g]..group_bounds[g + 1] {
+                results.push((sorted_indices[j].1, Arc::clone(pf)));
             }
         }
+    }
+    results
+}
 
-        results
-    });
+/// Batch I/O helper (non-Unix): portable fallback using std::fs.
+#[cfg(not(unix))]
+fn batch_open_io(filenames: &[String], exts: &[&str]) -> Vec<(usize, Arc<PreSerializedFile>)> {
+    use rayon::prelude::*;
+    use std::io::Read;
+    let n = filenames.len();
+    if n == 0 { return Vec::new(); }
 
-    // Close directory fd if we opened one
-    if dir_fd >= 0 { unsafe { libc::close(dir_fd); } }
+    // Phase 1: Get file sizes via std::fs::metadata.
+    let sizes: Vec<i64> = (0..n).into_par_iter()
+        .map(|i| std::fs::metadata(&filenames[i]).map(|m| m.len() as i64).unwrap_or(-1))
+        .collect();
+
+    // Phase 2: Group by (file_size, extension) using sort.
+    let mut sorted_indices: Vec<(u64, usize)> = Vec::with_capacity(n);
+    for i in 0..n {
+        if sizes[i] >= 0 {
+            let ext_id: u64 = match exts[i].as_bytes() {
+                b"mp3" | b"MP3" => 1,
+                b"flac" | b"FLAC" => 2,
+                b"ogg" | b"OGG" => 3,
+                b"mp4" | b"MP4" | b"m4a" | b"M4A" | b"m4b" | b"M4B" => 4,
+                _ => 0,
+            };
+            sorted_indices.push(((sizes[i] as u64) << 4 | ext_id, i));
+        }
+    }
+    sorted_indices.sort_unstable_by_key(|&(k, _)| k);
+
+    let mut reps: Vec<usize> = Vec::new();
+    let mut group_bounds: Vec<usize> = Vec::new();
+    {
+        let mut i = 0;
+        while i < sorted_indices.len() {
+            let key = sorted_indices[i].0;
+            reps.push(sorted_indices[i].1);
+            group_bounds.push(i);
+            while i < sorted_indices.len() && sorted_indices[i].0 == key { i += 1; }
+        }
+        group_bounds.push(sorted_indices.len());
+    }
+
+    // Phase 3: Parse representatives in parallel using std::fs.
+    let parsed: HashMap<usize, Arc<PreSerializedFile>> = reps.par_iter().copied()
+        .filter_map(|i| {
+            let file_len = sizes[i] as usize;
+            let ext = exts[i];
+
+            let pf = if ext.eq_ignore_ascii_case("flac") && file_len > 4096 {
+                let mut file = std::fs::File::open(&filenames[i]).ok()?;
+                let mut buf = vec![0u8; 4096];
+                file.read_exact(&mut buf).ok()?;
+                if let Some(pf) = parse_flac_batch(&buf) {
+                    if pf.lazy_vc.is_some() {
+                        Some(pf)
+                    } else {
+                        let data = std::fs::read(&filenames[i]).ok()?;
+                        parse_flac_batch(&data)
+                    }
+                } else {
+                    let data = std::fs::read(&filenames[i]).ok()?;
+                    parse_flac_batch(&data)
+                }
+            } else {
+                let data = std::fs::read(&filenames[i]).ok()?;
+                parse_and_serialize(&data, &filenames[i])
+            }?;
+
+            Some((i, Arc::new(pf)))
+        })
+        .collect();
+
+    // Phase 4: Assign results by group.
+    let mut results: Vec<(usize, Arc<PreSerializedFile>)> = Vec::with_capacity(n);
+    for (g, &rep) in reps.iter().enumerate() {
+        if let Some(pf) = parsed.get(&rep) {
+            for j in group_bounds[g]..group_bounds[g + 1] {
+                results.push((sorted_indices[j].1, Arc::clone(pf)));
+            }
+        }
+    }
+    results
+}
+
+/// Batch open: read and parse multiple files in parallel using rayon.
+/// Returns a native Python dict (path → metadata dict) for zero-overhead iteration.
+#[pyfunction]
+fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
+    let exts: Vec<&str> = filenames.iter()
+        .map(|p| p.rsplit('.').next().unwrap_or(""))
+        .collect();
+
+    let file_indices: Vec<(usize, Arc<PreSerializedFile>)> =
+        py.detach(|| batch_open_io(&filenames, &exts));
 
     // Build native Python dict with dict-level dedup (one materialization per unique file)
     unsafe {
