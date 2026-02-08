@@ -1,6 +1,6 @@
 [package]
 name = "mutagen-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-performance audio metadata library — drop-in replacement for mutagen"
 license = "MIT"

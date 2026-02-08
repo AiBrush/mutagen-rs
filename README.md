@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml/badge.svg)](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml)
 [![PyPI](https://img.shields.io/pypi/v/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
+[![crates.io](https://img.shields.io/crates/v/mutagen-rs)](https://crates.io/crates/mutagen-rs)
+[![docs.rs](https://docs.rs/mutagen-rs/badge.svg)](https://docs.rs/mutagen-rs)
 [![Python](https://img.shields.io/pypi/pyversions/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-
+[![Downloads](https://img.shields.io/pypi/dm/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing and **100x+ faster** batch processing on all formats.
 
@@ -63,9 +65,21 @@ All benchmarks measure full tag parsing + info extraction + iteration of all key
 
 ## Installation
 
+### Python
+
 ```bash
 pip install mutagen-rs
 ```
+
+Pre-built wheels are available for Linux, macOS, and Windows across Python 3.9 - 3.13. See [PyPI](https://pypi.org/project/mutagen-rs/) for all available distributions.
+
+### Rust
+
+```bash
+cargo add mutagen-rs
+```
+
+The Rust crate provides the core parsing library without Python bindings. Enable the `python` feature for PyO3 bindings. See [crates.io](https://crates.io/crates/mutagen-rs) and [docs.rs](https://docs.rs/mutagen-rs) for API documentation.
 
 ### From source
 
@@ -181,6 +195,13 @@ python tests/test_performance.py
 maturin develop --release && python -m pytest tests/ -v && python tests/test_performance.py
 ```
 
+## Links
+
+- [PyPI](https://pypi.org/project/mutagen-rs/) - Python package
+- [crates.io](https://crates.io/crates/mutagen-rs) - Rust crate
+- [docs.rs](https://docs.rs/mutagen-rs) - Rust API documentation
+- [GitHub](https://github.com/AiBrush/mutagen-rs) - Source code and issues
+
 ## License
 
-MIT
+[MIT](LICENSE)

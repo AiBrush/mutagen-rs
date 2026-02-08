@@ -26,11 +26,15 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+readme = "README.md"
 dynamic = ["version"]
 
 [project.urls]
+Homepage = "https://github.com/AiBrush/mutagen-rs"
 Repository = "https://github.com/AiBrush/mutagen-rs"
 Issues = "https://github.com/AiBrush/mutagen-rs/issues"
+Documentation = "https://github.com/AiBrush/mutagen-rs#readme"
+Changelog = "https://github.com/AiBrush/mutagen-rs/releases"
 
 [tool.maturin]
 python-source = "python"
