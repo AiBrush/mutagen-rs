@@ -1,12 +1,12 @@
 # mutagen-rs
 
 [![CI](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml/badge.svg)](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml)
-[![PyPI](https://img.shields.io/pypi/v/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
-[![crates.io](https://img.shields.io/crates/v/mutagen-rs)](https://crates.io/crates/mutagen-rs)
+[![PyPI](https://img.shields.io/pypi/v/mutagen-rs?color=blue)](https://pypi.org/project/mutagen-rs/)
+[![crates.io](https://img.shields.io/crates/v/mutagen-rs?color=orange)](https://crates.io/crates/mutagen-rs)
 [![docs.rs](https://docs.rs/mutagen-rs/badge.svg)](https://docs.rs/mutagen-rs)
 [![Python](https://img.shields.io/pypi/pyversions/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
-[![Downloads](https://img.shields.io/pypi/dm/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/AiBrush/mutagen-rs)](https://github.com/AiBrush/mutagen-rs/releases)
 
 High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing and **100x+ faster** batch processing on all formats.
 
