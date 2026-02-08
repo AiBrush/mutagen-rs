@@ -45,9 +45,8 @@ fn read_cached(path: &str) -> std::io::Result<Arc<[u8]>> {
 }
 
 /// Read a file directly, bypassing the global cache.
-/// Optimal for _fast_read hot path: no RwLock, no HashMap, no Arc overhead.
+/// Uses std::fs::read which pre-allocates via fstat for exact buffer sizing.
 #[inline]
-#[allow(dead_code)]
 fn read_direct(path: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(path)
 }
@@ -1660,12 +1659,13 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
 
         // Use index-based iteration with min_len to amortize rayon overhead.
         // Each rayon task processes at least 16 files sequentially.
+        // Bypass file cache — read directly, avoid RwLock + Arc + fstat overhead.
         (0..n).into_par_iter()
             .with_min_len(16)
             .filter_map(|i| {
                 let path = &filenames[i];
-                let data = read_cached(path).ok()?;
-                let pf = parse_and_serialize(&data, path, Some(&data))?;
+                let data = read_direct(path).ok()?;
+                let pf = parse_and_serialize(&data, path, None)?;
                 Some((path.clone(), pf))
             })
             .collect()
@@ -1683,10 +1683,10 @@ fn batch_diag(py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
     let result = py.detach(|| {
         let n = filenames.len();
 
-        // Phase 1: Sequential file reads
+        // Phase 1: Sequential file reads (no fstat)
         let t1 = Instant::now();
         let file_data: Vec<(String, Vec<u8>)> = filenames.iter()
-            .filter_map(|p| std::fs::read(p).ok().map(|d| (p.clone(), d)))
+            .filter_map(|p| read_direct(p).ok().map(|d| (p.clone(), d)))
             .collect();
         let read_seq_us = t1.elapsed().as_micros();
 
@@ -1707,7 +1707,7 @@ fn batch_diag(py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
         // Phase 4: Parallel read+parse (current approach)
         let t4 = Instant::now();
         let _: Vec<_> = filenames.par_iter().filter_map(|path| {
-            let data = std::fs::read(path).ok()?;
+            let data = read_direct(path).ok()?;
             let pf = parse_and_serialize(&data, path, None)?;
             Some((path.clone(), pf))
         }).collect();
@@ -2002,6 +2002,48 @@ fn set_keys_list(
     Ok(())
 }
 
+// ---- Interned tag key cache ----
+// Caches Python string objects for common ID3 frame IDs (4 bytes) and Vorbis comment keys.
+// Avoids PyUnicode_FromStringAndSize per tag on repeated file reads.
+// Thread-safe via GIL: only accessed from _fast_read which holds the GIL.
+
+use std::cell::RefCell;
+
+thread_local! {
+    static TAG_KEY_INTERN: RefCell<HashMap<[u8; 8], *mut pyo3::ffi::PyObject>> = RefCell::new(HashMap::with_capacity(64));
+}
+
+/// Get or create an interned Python string for a tag key.
+/// Returns a NEW reference (caller must DECREF or transfer ownership).
+#[inline(always)]
+unsafe fn intern_tag_key(key: &[u8]) -> *mut pyo3::ffi::PyObject {
+    if key.len() > 8 {
+        // Long keys: create directly, don't cache
+        return pyo3::ffi::PyUnicode_FromStringAndSize(
+            key.as_ptr() as *const std::ffi::c_char,
+            key.len() as pyo3::ffi::Py_ssize_t);
+    }
+    let mut buf = [0u8; 8];
+    buf[..key.len()].copy_from_slice(key);
+
+    TAG_KEY_INTERN.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(&ptr) = cache.get(&buf) {
+            pyo3::ffi::Py_INCREF(ptr);
+            ptr
+        } else {
+            let ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                key.as_ptr() as *const std::ffi::c_char,
+                key.len() as pyo3::ffi::Py_ssize_t);
+            if !ptr.is_null() {
+                pyo3::ffi::Py_INCREF(ptr); // one ref for cache, one for caller
+                cache.insert(buf, ptr);
+            }
+            ptr
+        }
+    })
+}
+
 // ---- Raw FFI helpers for fast dict population ----
 
 #[inline(always)]
@@ -2106,9 +2148,7 @@ fn fast_walk_v22_frames(
                 let key = frame.hash_key();
                 let py_val = frame_to_py(py, &frame);
                 unsafe {
-                    let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                        key.as_str().as_ptr() as *const std::ffi::c_char,
-                        key.as_str().len() as pyo3::ffi::Py_ssize_t);
+                    let key_ptr = intern_tag_key(key.as_str().as_bytes());
                     pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
                     key_ptrs.push(key_ptr);
                 }
@@ -2126,8 +2166,7 @@ fn fast_walk_v22_frames(
         if v24_id.as_bytes()[0] == b'T' && v24_id != "TXXX" && v24_id != "TIPL" && v24_id != "TMCL" && v24_id != "IPLS" {
             unsafe {
                 if let Some(py_ptr) = try_text_frame_to_py(frame_data) {
-                    let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                        v24_id.as_ptr() as *const std::ffi::c_char, v24_id.len() as pyo3::ffi::Py_ssize_t);
+                    let key_ptr = intern_tag_key(v24_id.as_bytes());
                     if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                         pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_ptr);
                         key_ptrs.push(key_ptr);
@@ -2145,9 +2184,7 @@ fn fast_walk_v22_frames(
             let key = frame.hash_key();
             let py_val = frame_to_py(py, &frame);
             unsafe {
-                let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                    key.as_str().as_ptr() as *const std::ffi::c_char,
-                    key.as_str().len() as pyo3::ffi::Py_ssize_t);
+                let key_ptr = intern_tag_key(key.as_str().as_bytes());
                 if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                     pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
                     key_ptrs.push(key_ptr);
@@ -2191,8 +2228,7 @@ fn fast_walk_v2x_frames(
             if id_bytes[0] == b'T' && id_str != "TXXX" && id_str != "TIPL" && id_str != "TMCL" && id_str != "IPLS" {
                 unsafe {
                     if let Some(py_ptr) = try_text_frame_to_py(frame_data) {
-                        let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                            id_str.as_ptr() as *const std::ffi::c_char, 4);
+                        let key_ptr = intern_tag_key(id_bytes);
                         if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                             pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_ptr);
                             key_ptrs.push(key_ptr);
@@ -2214,8 +2250,7 @@ fn fast_walk_v2x_frames(
                         let py_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
                             frame_data.as_ptr() as *const std::ffi::c_char, flen as pyo3::ffi::Py_ssize_t);
                         if !py_ptr.is_null() {
-                            let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                                id_str.as_ptr() as *const std::ffi::c_char, 4);
+                            let key_ptr = intern_tag_key(id_bytes);
                             if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                                 pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_ptr);
                                 key_ptrs.push(key_ptr);
@@ -2234,9 +2269,7 @@ fn fast_walk_v2x_frames(
                 let key = frame.hash_key();
                 let py_val = frame_to_py(py, &frame);
                 unsafe {
-                    let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                        key.as_str().as_ptr() as *const std::ffi::c_char,
-                        key.as_str().len() as pyo3::ffi::Py_ssize_t);
+                    let key_ptr = intern_tag_key(key.as_str().as_bytes());
                     if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                         pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
                         key_ptrs.push(key_ptr);
@@ -2265,9 +2298,7 @@ fn fast_walk_v2x_frames(
                 let key = frame.hash_key();
                 let py_val = frame_to_py(py, &frame);
                 unsafe {
-                    let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                        key.as_str().as_ptr() as *const std::ffi::c_char,
-                        key.as_str().len() as pyo3::ffi::Py_ssize_t);
+                    let key_ptr = intern_tag_key(key.as_str().as_bytes());
                     if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                         pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
                         key_ptrs.push(key_ptr);
@@ -2318,13 +2349,11 @@ fn parse_vc_to_dict_direct<'py>(
 
         unsafe {
             // Always uppercase key into stack buffer (branchless, no UTF-8 precheck)
-            // PyUnicode_FromStringAndSize validates UTF-8 internally, so skip std::str::from_utf8
             let mut buf = [0u8; 128];
             let key_len = key_bytes.len().min(128);
             for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_uppercase(); }
 
-            let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                buf.as_ptr() as *const std::ffi::c_char, key_len as pyo3::ffi::Py_ssize_t);
+            let key_ptr = intern_tag_key(&buf[..key_len]);
             if key_ptr.is_null() { pyo3::ffi::PyErr_Clear(); continue; }
 
             // Create value PyUnicode directly from raw bytes (CPython validates UTF-8)
@@ -2581,9 +2610,7 @@ fn fast_read_mp3_direct<'py>(py: Python<'py>, data: &[u8], _path: &str, dict: &B
                     let key = frame.hash_key();
                     let key_str = key.as_str();
                     unsafe {
-                        let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                            key_str.as_ptr() as *const std::ffi::c_char,
-                            key_str.len() as pyo3::ffi::Py_ssize_t);
+                        let key_ptr = intern_tag_key(key_str.as_bytes());
                         if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
                             let py_val = frame_to_py(py, &frame);
                             pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
@@ -3030,8 +3057,8 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
         }
     }
 
-    // Level 2: Parse from file data cache
-    let data = read_cached(filename)
+    // Level 2: Read file directly (no cache layer, no fstat — avoids RwLock + Arc + stat overhead)
+    let data = read_direct(filename)
         .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
 
     // Pre-size dict: ~12 info fields + ~8 tag entries typical

@@ -132,25 +132,29 @@ impl OggPage {
 pub fn find_last_granule(data: &[u8], serial: u32) -> Option<i64> {
     use memchr::memmem;
 
-    let search_start = data.len().saturating_sub(65536);
-    let search_data = &data[search_start..];
+    // Tiered search: try small window first (covers most files), then expand.
+    // Most OGG files have the last page within the last 8KB.
+    for &window in &[8192usize, 65536] {
+        let search_start = data.len().saturating_sub(window);
+        let search_data = &data[search_start..];
 
-    // Use SIMD-accelerated reverse search for "OggS" magic
-    for pos in memmem::rfind_iter(search_data, b"OggS") {
-        let abs_pos = search_start + pos;
-        if abs_pos + 27 > data.len() {
-            continue;
+        // Use SIMD-accelerated reverse search for "OggS" magic
+        for pos in memmem::rfind_iter(search_data, b"OggS") {
+            let abs_pos = search_start + pos;
+            if abs_pos + 27 > data.len() {
+                continue;
+            }
+            let d = &data[abs_pos..];
+            let page_serial = u32::from_le_bytes([d[14], d[15], d[16], d[17]]);
+            if page_serial == serial {
+                let granule = i64::from_le_bytes([
+                    d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13],
+                ]);
+                return Some(granule);
+            }
         }
-        let d = &data[abs_pos..];
-        // serial_number at offset 14-17
-        let page_serial = u32::from_le_bytes([d[14], d[15], d[16], d[17]]);
-        if page_serial == serial {
-            // granule_position at offset 6-13
-            let granule = i64::from_le_bytes([
-                d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13],
-            ]);
-            return Some(granule);
-        }
+        // If file is smaller than the window, no point expanding
+        if data.len() <= window { break; }
     }
     None
 }
