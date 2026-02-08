@@ -998,9 +998,9 @@ struct PreSerializedFile {
     tags: Vec<(String, BatchTagValue)>,
     // Format-specific extra metadata (emitted as dict entries in _fast_read)
     extra: Vec<(&'static str, BatchTagValue)>,
-    // Lazy VC tag support: (file_data, vc_block_offset, vc_block_size)
-    // When set, tags will be parsed on-demand from raw data, skipping String allocation during batch.
-    lazy_vc: Option<(Arc<[u8]>, usize, usize)>,
+    // Lazy VC tag support: raw Vorbis Comment bytes (copied from file data).
+    // When set, tags will be parsed on-demand, skipping String allocation during batch parallel phase.
+    lazy_vc: Option<Vec<u8>>,
 }
 
 /// Convert a Frame to a BatchTagValue (runs in parallel phase, no GIL needed).
@@ -1114,7 +1114,7 @@ fn parse_vc_to_batch_tags(data: &[u8]) -> Vec<(String, BatchTagValue)> {
 
 /// Batch-optimized FLAC parser: skips pictures, direct VC parsing.
 #[inline(always)]
-fn parse_flac_batch(data: &[u8], data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
+fn parse_flac_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
     let flac_offset = if data.len() >= 4 && &data[0..4] == b"fLaC" {
         0
     } else if data.len() >= 10 && &data[0..3] == b"ID3" {
@@ -1161,21 +1161,16 @@ fn parse_flac_batch(data: &[u8], data_arc: Option<&Arc<[u8]>>) -> Option<PreSeri
 
     if sample_rate == 0 { return None; }
 
-    // Lazy VC: if we have Arc data, defer tag parsing to access time (no String allocations)
-    let (tags, lazy_vc) = if let (Some((vc_off, vc_sz)), Some(arc)) = (vc_pos, data_arc) {
-        (Vec::new(), Some((Arc::clone(arc), vc_off, vc_sz)))
-    } else if let Some((vc_off, vc_sz)) = vc_pos {
-        (parse_vc_to_batch_tags(&data[vc_off..vc_off + vc_sz]), None)
-    } else {
-        (Vec::new(), None)
-    };
+    // Lazy VC: copy just the VC raw bytes (typically 100-1000 bytes), defer parsing to access time.
+    // This avoids ~15 String allocations per file during the rayon parallel phase.
+    let lazy_vc = vc_pos.map(|(off, sz)| data[off..off + sz].to_vec());
 
     Some(PreSerializedFile {
         length,
         sample_rate,
         channels: channels as u32,
         bitrate: None,
-        tags,
+        tags: Vec::new(),
         extra: Vec::new(),
         lazy_vc,
     })
@@ -1183,7 +1178,7 @@ fn parse_flac_batch(data: &[u8], data_arc: Option<&Arc<[u8]>>) -> Option<PreSeri
 
 /// Batch-optimized OGG Vorbis parser: inline page headers, direct VC parsing.
 #[inline(always)]
-fn parse_ogg_batch(data: &[u8], data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
+fn parse_ogg_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
     if data.len() < 58 || &data[0..4] != b"OggS" { return None; }
 
     let serial = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
@@ -1228,19 +1223,15 @@ fn parse_ogg_batch(data: &[u8], data_arc: Option<&Arc<[u8]>>) -> Option<PreSeria
         .map(|g| if g > 0 && sample_rate > 0 { g as f64 / sample_rate as f64 } else { 0.0 })
         .unwrap_or(0.0);
 
-    // Lazy VC: if we have Arc data, defer tag parsing to access time
-    let (tags, lazy_vc) = if let Some(arc) = data_arc {
-        (Vec::new(), Some((Arc::clone(arc), vc_offset, vc_size)))
-    } else {
-        (parse_vc_to_batch_tags(&data[vc_offset..vc_offset + vc_size]), None)
-    };
+    // Lazy VC: copy just the VC raw bytes, defer parsing to dict creation time.
+    let lazy_vc = Some(data[vc_offset..vc_offset + vc_size].to_vec());
 
     Some(PreSerializedFile {
         length,
         sample_rate,
         channels: channels as u32,
         bitrate: None,
-        tags,
+        tags: Vec::new(),
         extra: Vec::new(),
         lazy_vc,
     })
@@ -1423,34 +1414,97 @@ fn batch_value_to_py(py: Python<'_>, bv: &BatchTagValue) -> PyResult<Py<PyAny>> 
     }
 }
 
-/// Convert pre-serialized file to Python dict (minimal serial work with interned keys).
+/// Convert BatchTagValue to raw *mut PyObject (bypasses PyO3 wrappers for speed).
+/// Returns new reference. Caller must Py_DECREF.
+#[inline(always)]
+unsafe fn batch_value_to_py_ffi(py: Python<'_>, bv: &BatchTagValue) -> *mut pyo3::ffi::PyObject {
+    match bv {
+        BatchTagValue::Text(s) => {
+            pyo3::ffi::PyUnicode_FromStringAndSize(
+                s.as_ptr() as *const std::ffi::c_char,
+                s.len() as pyo3::ffi::Py_ssize_t)
+        }
+        BatchTagValue::TextList(v) => {
+            let list = pyo3::ffi::PyList_New(v.len() as pyo3::ffi::Py_ssize_t);
+            if list.is_null() { return std::ptr::null_mut(); }
+            for (i, s) in v.iter().enumerate() {
+                let obj = pyo3::ffi::PyUnicode_FromStringAndSize(
+                    s.as_ptr() as *const std::ffi::c_char,
+                    s.len() as pyo3::ffi::Py_ssize_t);
+                pyo3::ffi::PyList_SET_ITEM(list, i as pyo3::ffi::Py_ssize_t, obj); // steals ref
+            }
+            list
+        }
+        BatchTagValue::Bytes(d) => {
+            pyo3::ffi::PyBytes_FromStringAndSize(
+                d.as_ptr() as *const std::ffi::c_char,
+                d.len() as pyo3::ffi::Py_ssize_t)
+        }
+        BatchTagValue::Int(i) => pyo3::ffi::PyLong_FromLongLong(*i),
+        BatchTagValue::IntPair(a, b) => {
+            // Fall back to PyO3 for tuple creation (rare path)
+            match PyTuple::new(py, &[*a, *b]) {
+                Ok(t) => { let ptr = t.as_ptr(); pyo3::ffi::Py_INCREF(ptr); ptr }
+                Err(_) => std::ptr::null_mut()
+            }
+        }
+        BatchTagValue::Bool(v) => {
+            if *v { pyo3::ffi::Py_INCREF(pyo3::ffi::Py_True()); pyo3::ffi::Py_True() }
+            else { pyo3::ffi::Py_INCREF(pyo3::ffi::Py_False()); pyo3::ffi::Py_False() }
+        }
+        // Complex types: fall back to PyO3 (rare paths, not worth optimizing)
+        _ => {
+            match batch_value_to_py(py, bv) {
+                Ok(obj) => { let ptr = obj.as_ptr(); pyo3::ffi::Py_INCREF(ptr); ptr }
+                Err(_) => std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Convert pre-serialized file to Python dict using raw CPython FFI (faster than PyO3 wrappers).
 #[inline(always)]
 fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<Py<PyAny>> {
-    let inner = PyDict::new(py);
-    inner.set_item(pyo3::intern!(py, "length"), pf.length)?;
-    inner.set_item(pyo3::intern!(py, "sample_rate"), pf.sample_rate)?;
-    inner.set_item(pyo3::intern!(py, "channels"), pf.channels)?;
-    if let Some(br) = pf.bitrate {
-        inner.set_item(pyo3::intern!(py, "bitrate"), br)?;
-    }
-    // Materialize lazy VC tags on demand if needed
-    let lazy_tags;
-    let tags = if pf.tags.is_empty() {
-        if let Some((data, offset, size)) = &pf.lazy_vc {
-            lazy_tags = parse_vc_to_batch_tags(&data[*offset..*offset + *size]);
-            &lazy_tags
+    unsafe {
+        let inner = pyo3::ffi::_PyDict_NewPresized(6);
+        if inner.is_null() {
+            return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
+        }
+        set_dict_f64(inner, pyo3::intern!(py, "length").as_ptr(), pf.length);
+        set_dict_u32(inner, pyo3::intern!(py, "sample_rate").as_ptr(), pf.sample_rate);
+        set_dict_u32(inner, pyo3::intern!(py, "channels").as_ptr(), pf.channels);
+        if let Some(br) = pf.bitrate {
+            set_dict_u32(inner, pyo3::intern!(py, "bitrate").as_ptr(), br);
+        }
+        // Materialize lazy VC tags on demand if needed
+        let lazy_tags;
+        let tags = if pf.tags.is_empty() {
+            if let Some(ref vc_bytes) = pf.lazy_vc {
+                lazy_tags = parse_vc_to_batch_tags(vc_bytes);
+                &lazy_tags
+            } else {
+                &pf.tags
+            }
         } else {
             &pf.tags
+        };
+        let tags_dict = pyo3::ffi::_PyDict_NewPresized(tags.len() as pyo3::ffi::Py_ssize_t);
+        if !tags_dict.is_null() {
+            for (key, value) in tags {
+                let key_ptr = intern_tag_key(key.as_bytes());
+                if key_ptr.is_null() { continue; }
+                let val_ptr = batch_value_to_py_ffi(py, value);
+                if !val_ptr.is_null() {
+                    pyo3::ffi::PyDict_SetItem(tags_dict, key_ptr, val_ptr);
+                    pyo3::ffi::Py_DECREF(val_ptr);
+                }
+                pyo3::ffi::Py_DECREF(key_ptr);
+            }
+            pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
+            pyo3::ffi::Py_DECREF(tags_dict);
         }
-    } else {
-        &pf.tags
-    };
-    let tags_dict = PyDict::new(py);
-    for (key, value) in tags {
-        tags_dict.set_item(key.as_str(), batch_value_to_py(py, value)?)?;
+        Ok(Py::from_owned_ptr(py, inner))
     }
-    inner.set_item(pyo3::intern!(py, "tags"), tags_dict)?;
-    Ok(inner.into_any().unbind())
 }
 
 /// JSON-escape a string value for safe embedding in JSON.
@@ -1557,8 +1611,8 @@ fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
     // Materialize lazy VC tags if needed
     let lazy_tags;
     let tags = if pf.tags.is_empty() {
-        if let Some((data, offset, size)) = &pf.lazy_vc {
-            lazy_tags = parse_vc_to_batch_tags(&data[*offset..*offset + *size]);
+        if let Some(ref vc_bytes) = pf.lazy_vc {
+            lazy_tags = parse_vc_to_batch_tags(vc_bytes);
             &lazy_tags
         } else {
             &pf.tags
@@ -1734,8 +1788,8 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
             // Tags via raw FFI
             let lazy_tags;
             let tags = if pf.tags.is_empty() {
-                if let Some((data, offset, size)) = &pf.lazy_vc {
-                    lazy_tags = parse_vc_to_batch_tags(&data[*offset..*offset + *size]);
+                if let Some(ref vc_bytes) = pf.lazy_vc {
+                    lazy_tags = parse_vc_to_batch_tags(vc_bytes);
                     &lazy_tags
                 } else {
                     &pf.tags
@@ -1935,8 +1989,8 @@ fn preserialized_to_flat_dict(py: Python<'_>, pf: &PreSerializedFile, dict: &Bou
     // Materialize lazy VC tags on demand if needed
     let lazy_tags;
     let tags = if pf.tags.is_empty() {
-        if let Some((data, offset, size)) = &pf.lazy_vc {
-            lazy_tags = parse_vc_to_batch_tags(&data[*offset..*offset + *size]);
+        if let Some(ref vc_bytes) = pf.lazy_vc {
+            lazy_tags = parse_vc_to_batch_tags(vc_bytes);
             &lazy_tags
         } else {
             &pf.tags
