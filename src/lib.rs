@@ -3227,7 +3227,7 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
         }
     }
 
-    // Level 2: Read file directly (no cache layer, no fstat — avoids RwLock + Arc + stat overhead)
+    // Level 2: Read file directly (no cache layer — avoids RwLock + Arc + stat overhead)
     let data = read_direct(filename)
         .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
 
