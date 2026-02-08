@@ -7,7 +7,7 @@ from datetime import datetime
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-RESULTS_FILE = os.path.join(ROOT_DIR, "performance_results.json")
+RESULTS_FILE = os.path.join(SCRIPT_DIR, "performance_results.json")
 CRITERION_DIR = os.path.join(ROOT_DIR, "target", "criterion")
 SUMMARY_FILE = os.path.join(SCRIPT_DIR, "SUMMARY.md")
 HISTORY_FILE = os.path.join(SCRIPT_DIR, "history.json")

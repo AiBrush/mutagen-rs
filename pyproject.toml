@@ -5,12 +5,32 @@ build-backend = "maturin"
 [project]
 name = "mutagen-rs"
 requires-python = ">=3.8"
+description = "High-performance audio metadata library written in Rust — drop-in replacement for mutagen"
+license = { text = "MIT" }
+keywords = ["audio", "metadata", "id3", "flac", "mp3", "mp4", "ogg", "vorbis", "tags", "music"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/AiBrush/mutagen-rs"
+Issues = "https://github.com/AiBrush/mutagen-rs/issues"
 
 [tool.maturin]
 python-source = "python"

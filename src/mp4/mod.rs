@@ -1,7 +1,7 @@
 pub mod atom;
 
 use crate::common::error::{MutagenError, Result};
-use crate::mp4::atom::{Atom, AtomIter, parse_atoms};
+use crate::mp4::atom::AtomIter;
 
 /// MP4 audio information.
 #[derive(Debug, Clone)]

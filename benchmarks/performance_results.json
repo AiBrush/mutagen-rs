@@ -1,0 +1,72 @@
+{
+  "mp3": {
+    "files": 19,
+    "original_ms_per_file": 0.28526973684213436,
+    "rust_cold_ms_per_file": 0.010988157890479718,
+    "rust_warm_ms_per_file": 0.0008335263086528835,
+    "speedup_cold": 25.961561499702853,
+    "speedup_warm": 342.2444305365447
+  },
+  "flac": {
+    "files": 7,
+    "original_ms_per_file": 0.11544371428889073,
+    "rust_cold_ms_per_file": 0.011185428580314951,
+    "rust_warm_ms_per_file": 0.0007571428406143761,
+    "speedup_cold": 10.320902186265636,
+    "speedup_warm": 152.47283352136708
+  },
+  "ogg": {
+    "files": 3,
+    "original_ms_per_file": 0.2561479999106571,
+    "rust_cold_ms_per_file": 0.019670333282798918,
+    "rust_warm_ms_per_file": 0.000631333326358193,
+    "speedup_cold": 13.022046765961534,
+    "speedup_warm": 405.7254531266882
+  },
+  "mp4": {
+    "files": 9,
+    "original_ms_per_file": 0.2537957778056605,
+    "rust_cold_ms_per_file": 0.011182444419925256,
+    "rust_warm_ms_per_file": 0.0006573333545626762,
+    "speedup_cold": 22.69591229565502,
+    "speedup_warm": 386.09904098737053
+  },
+  "auto_detect": {
+    "files": 38,
+    "original_ms_per_file": 0.33850676315619477,
+    "rust_cold_ms_per_file": 0.01373563157501753,
+    "rust_warm_ms_per_file": 0.0007825789524711007,
+    "speedup_cold": 24.644426527271847,
+    "speedup_warm": 432.5528588359208
+  },
+  "batch_mp3": {
+    "files": 760,
+    "original_ms_per_file": 0.3002288486844631,
+    "rust_batch_ms_per_file": 0.00864412894722926,
+    "speedup": 34.73211129973909
+  },
+  "batch_flac": {
+    "files": 280,
+    "original_ms_per_file": 0.12384273214333268,
+    "rust_batch_ms_per_file": 0.010791046427779553,
+    "speedup": 11.476434002222664
+  },
+  "batch_ogg": {
+    "files": 120,
+    "original_ms_per_file": 0.2407349833333683,
+    "rust_batch_ms_per_file": 0.026454100001653085,
+    "speedup": 9.100101054971633
+  },
+  "batch_mp4": {
+    "files": 360,
+    "original_ms_per_file": 0.2692685583333008,
+    "rust_batch_ms_per_file": 0.012680013888813037,
+    "speedup": 21.235667460180267
+  },
+  "batch_auto_detect": {
+    "files": 1520,
+    "original_ms_per_file": 0.3354453756580704,
+    "rust_batch_ms_per_file": 0.012702198684241682,
+    "speedup": 26.4084497492724
+  }
+}

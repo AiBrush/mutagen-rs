@@ -514,6 +514,7 @@ fn quick_hash_key(id: &str, data: &[u8]) -> HashKey {
 
 /// Quick hash key extraction for Slice variant using raw_buf data.
 #[inline]
+#[allow(dead_code)]
 fn quick_hash_key_from_buf(id: &[u8; 4], buf: &[u8], offset: u32, len: u32) -> HashKey {
     let id_str = std::str::from_utf8(id).unwrap_or("XXXX");
     let data = &buf[offset as usize..(offset as usize + len as usize)];

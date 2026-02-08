@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Write, Seek, SeekFrom, Read};
 use crate::common::error::{MutagenError, Result};
 use crate::vorbis::VorbisComment;

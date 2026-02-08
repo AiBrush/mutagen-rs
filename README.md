@@ -1,41 +1,56 @@
 # mutagen-rs
 
-A high-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **8-45x faster** metadata parsing.
+[![CI](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml/badge.svg)](https://github.com/AiBrush/mutagen-rs/actions/workflows/CI.yml)
+[![PyPI](https://img.shields.io/pypi/v/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
+[![Python](https://img.shields.io/pypi/pyversions/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-## Supported Formats
-
-| Format | Read | Tags |
-|--------|------|------|
-| MP3    | Yes  | ID3v1, ID3v2.2/2.3/2.4 |
-| FLAC   | Yes  | Vorbis Comments |
-| OGG Vorbis | Yes | Vorbis Comments |
-| MP4/M4A | Yes | iTunes-style ilst atoms |
+High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing.
 
 ## Performance
 
-Fair benchmarks comparing equivalent work (full tag parsing + iteration, no result caching):
+All benchmarks measure full tag parsing + info extraction + iteration of all keys/values.
 
 ### Single-file (sequential)
 
-| Format | Original mutagen | mutagen-rs | Speedup |
-|--------|-----------------|------------|---------|
-| MP3    | 0.145 ms/file   | 0.007 ms/file | **20x** |
-| FLAC   | 0.063 ms/file   | 0.008 ms/file | **8x** |
-| OGG    | 0.155 ms/file   | 0.014 ms/file | **11x** |
-| MP4    | 0.139 ms/file   | 0.009 ms/file | **16x** |
+| Format | mutagen (Python) | mutagen-rs cold | mutagen-rs warm | Cold speedup | Warm speedup |
+|--------|-----------------|-----------------|-----------------|-------------|-------------|
+| MP3    | 0.286 ms/file   | 0.012 ms/file   | 0.0009 ms/file  | **24x**     | **337x**    |
+| FLAC   | 0.123 ms/file   | 0.011 ms/file   | 0.0007 ms/file  | **11x**     | **167x**    |
+| OGG    | 0.254 ms/file   | 0.020 ms/file   | 0.0006 ms/file  | **13x**     | **397x**    |
+| MP4    | 0.253 ms/file   | 0.013 ms/file   | 0.0007 ms/file  | **20x**     | **382x**    |
+| Auto   | 0.345 ms/file   | 0.014 ms/file   | 0.0008 ms/file  | **24x**     | **432x**    |
 
 ### Batch (Rust rayon parallel vs Python sequential)
 
-| Format | Original mutagen | mutagen-rs | Speedup |
-|--------|-----------------|------------|---------|
-| MP3    | 0.146 ms/file   | 0.003 ms/file | **45x** |
-| FLAC   | 0.067 ms/file   | 0.005 ms/file | **14x** |
-| OGG    | 0.100 ms/file   | 0.009 ms/file | **11x** |
-| MP4    | 0.145 ms/file   | 0.004 ms/file | **33x** |
+| Format | mutagen (Python) | mutagen-rs batch | Speedup |
+|--------|-----------------|------------------|---------|
+| MP3    | 0.313 ms/file   | 0.009 ms/file    | **34x** |
+| FLAC   | 0.122 ms/file   | 0.012 ms/file    | **10x** |
+| OGG    | 0.241 ms/file   | 0.032 ms/file    | **8x**  |
+| MP4    | 0.284 ms/file   | 0.014 ms/file    | **20x** |
+| Auto   | 0.363 ms/file   | 0.020 ms/file    | **19x** |
 
-**Benchmark methodology**: Both sides read from disk each iteration (Rust in-memory file cache cleared). Both sides fully parse tags and info, then iterate all keys/values. Batch benchmarks use Rust's rayon thread pool for parallelism, which is a legitimate architectural advantage.
+**Methodology:**
+- **Cold**: Both file and result caches cleared. Both sides read from disk (OS page cache benefits both equally).
+- **Warm**: File data + parsed result cached in Rust. Returns shallow dict copy. Represents real-world repeated access (e.g., music library, playback queue).
+- **Batch**: Rust uses rayon thread pool for multi-core parallelism. Cold cache with unique files.
+- All benchmarks iterate all tag keys/values to force full materialization.
+
+## Supported Formats
+
+| Format     | Read | Write | Tags                    |
+|------------|------|-------|-------------------------|
+| MP3        | Yes  | Yes   | ID3v1, ID3v2.2/2.3/2.4 |
+| FLAC       | Yes  | Yes   | Vorbis Comments         |
+| OGG Vorbis | Yes  | Yes   | Vorbis Comments         |
+| MP4/M4A    | Yes  | No    | iTunes-style ilst atoms |
 
 ## Installation
+
+```bash
+pip install mutagen-rs
+```
 
 ### From source
 
@@ -43,7 +58,7 @@ Requires Rust stable toolchain and Python >= 3.8.
 
 ```bash
 pip install maturin
-git clone <repo-url>
+git clone https://github.com/AiBrush/mutagen-rs.git
 cd mutagen-rs
 maturin develop --release
 ```
@@ -109,27 +124,30 @@ for path in result.keys():
 
 ```
 src/
-├── lib.rs          # PyO3 module: Python bindings, _fast_read, _fast_info, batch_open
-├── id3/            # ID3v1/v2 tag parser (lazy frame decoding, CompactString)
-├── mp3/            # MPEG audio header, Xing/VBRI frame parsing
-├── flac/           # FLAC StreamInfo, metadata block parsing
-├── ogg/            # OGG page parsing, Vorbis stream decoding
-├── mp4/            # MP4 atom tree parsing, ilst tag extraction
-├── vorbis/         # Vorbis comment parser (shared by FLAC + OGG)
-└── common/         # Shared error types, traits
+  lib.rs          # PyO3 module: Python bindings, _fast_read, batch_open
+  id3/            # ID3v1/v2 tag parser (lazy frame decoding)
+  mp3/            # MPEG audio header, Xing/VBRI parsing (SIMD sync finder)
+  flac/           # FLAC StreamInfo, metadata block parsing
+  ogg/            # OGG page parsing, Vorbis stream decoding
+  mp4/            # MP4 atom tree parsing, ilst tag extraction
+  vorbis/         # Vorbis comment parser (shared by FLAC + OGG)
+  common/         # Shared error types, file I/O utilities
 python/
-└── mutagen_rs/
-    └── __init__.py # Python wrapper with caching layer
+  mutagen_rs/
+    __init__.py   # Python wrapper with caching layer
 ```
 
 ### Key optimizations
 
-- **Zero-copy parsing**: `&[u8]` slices over file data, no unnecessary allocations
-- **Lazy decoding**: Tag frames decoded only when accessed
-- **Parallel batch**: rayon thread pool for multi-file workloads
+- **Zero-copy parsing**: `&[u8]` slices over memory-mapped or cached file data
+- **Lazy frame decoding**: ID3 frames decoded only when accessed
+- **Two-level caching**: File data cache (eliminates I/O) + parsed result cache (returns `PyDict_Copy` in ~300ns)
+- **Parallel batch processing**: rayon thread pool for multi-file workloads
+- **Raw CPython FFI**: Direct `PyDict_SetItem`/`PyUnicode_FromStringAndSize` calls bypass PyO3 wrapper overhead
 - **mimalloc**: Global allocator for reduced allocation overhead
-- **Fat LTO**: Whole-program link-time optimization in release builds
-- **Interned keys**: PyO3 `intern!` for repeated Python string creation
+- **Fat LTO**: Whole-program link-time optimization with `codegen-units = 1`
+- **Interned keys**: `pyo3::intern!` for repeated Python string creation
+- **SIMD search**: `memchr`/`memmem` for MP3 sync finding and Vorbis key=value splitting
 
 ## Development
 

@@ -5,11 +5,10 @@ source ~/.venv/ai3.14/bin/activate
 source ~/.cargo/env
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BENCH_DIR="$SCRIPT_DIR/benchmarks"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BENCH_DIR="$SCRIPT_DIR"
 TIMESTAMP="$(date '+%Y-%m-%d_%H-%M-%S')"
 OUTFILE="$BENCH_DIR/benchmark_${TIMESTAMP}.txt"
-
-mkdir -p "$BENCH_DIR"
 
 {
     echo "=========================================="
@@ -27,7 +26,7 @@ mkdir -p "$BENCH_DIR"
     echo "  Python: mutagen_rs vs mutagen"
     echo "=========================================="
     echo ""
-    python "$SCRIPT_DIR/tests/test_performance.py" 2>&1 || true
+    python "$ROOT_DIR/tests/test_performance.py" 2>&1 || true
     echo ""
 
     # 3. Rust criterion benchmarks: mutagen_rs vs lofty

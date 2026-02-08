@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{Read, Write, Seek, SeekFrom};
 use crate::common::error::{MutagenError, Result};
 use crate::vorbis::VorbisComment;
@@ -387,6 +386,7 @@ impl OggVorbisFile {
 }
 
 /// OGG CRC32 lookup table.
+#[allow(dead_code)]
 const CRC_LOOKUP: [u32; 256] = {
     let mut table = [0u32; 256];
     let mut i = 0;

@@ -1,4 +1,4 @@
-use crate::common::error::{MutagenError, Result};
+use crate::common::error::Result;
 
 /// Container atom names that have children.
 #[allow(dead_code)]

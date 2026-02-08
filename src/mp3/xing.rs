@@ -1,4 +1,3 @@
-use crate::common::error::Result;
 use crate::mp3::header::{MPEGVersion, ChannelMode};
 
 /// Bitrate mode for VBR detection.

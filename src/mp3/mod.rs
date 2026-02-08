@@ -5,7 +5,7 @@ use crate::common::error::{MutagenError, Result};
 use crate::id3;
 use crate::id3::header::ID3Header;
 use crate::id3::tags::ID3Tags;
-use crate::mp3::header::{MPEGFrame, find_sync, ChannelMode};
+use crate::mp3::header::{find_sync, ChannelMode};
 use crate::mp3::xing::{XingHeader, VBRIHeader, BitrateMode};
 
 /// Parsed MP3 file information.
@@ -54,7 +54,7 @@ impl MPEGInfo {
         let mut length = 0.0f64;
         let mut bitrate = first_frame.bitrate * 1000;
         let mut encoder_info = String::new();
-        let mut encoder_settings = String::new();
+        let encoder_settings = String::new();
         let mut track_gain = None;
         let mut track_peak = None;
         let mut album_gain = None;
