@@ -17,11 +17,38 @@ permissions:
   contents: read
 
 jobs:
-  # ── Python wheels: Linux ──────────────────────────────────────────
+  # ── Python wheels: Linux (manylinux) ─────────────────────────────
   build-linux:
     name: Build (Linux ${{ matrix.target }})
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64, x86, aarch64, armv7, s390x, ppc64le]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist -i 3.9 3.10 3.11 3.12
+          sccache: true
+          manylinux: auto
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  # ── Python wheels: Linux (musllinux) ─────────────────────────────
+  build-musllinux:
+    name: Build (musllinux ${{ matrix.target }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -31,73 +58,83 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Build wheel
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i 3.12
+          args: --release --out dist -i 3.9 3.10 3.11 3.12
           sccache: true
-          manylinux: auto
-      - name: Upload wheel
-        uses: actions/upload-artifact@v6
+          manylinux: musllinux_1_2
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
         with:
-          name: wheel-linux-${{ matrix.target }}
-          path: dist/*.whl
+          name: wheels-musllinux-${{ matrix.target }}
+          path: dist
 
-  # ── Python wheels: macOS ──────────────────────────────────────────
+  # ── Python wheels: macOS ─────────────────────────────────────────
   build-macos:
     name: Build (macOS ${{ matrix.target }})
     if: github.event_name != 'pull_request'
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - runner: macos-13
+            target: x86_64
+          - runner: macos-latest
+            target: aarch64
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Build wheel
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --find-interpreter
           sccache: true
-      - name: Upload wheel
-        uses: actions/upload-artifact@v6
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
         with:
-          name: wheel-macos-${{ matrix.target }}
-          path: dist/*.whl
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
 
-  # ── Python wheels: Windows ────────────────────────────────────────
+  # ── Python wheels: Windows ───────────────────────────────────────
   build-windows:
     name: Build (Windows ${{ matrix.target }})
     if: github.event_name != 'pull_request'
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target: [x64, x86]
+        include:
+          - runner: windows-latest
+            target: x64
+            python_arch: x64
+          - runner: windows-latest
+            target: x86
+            python_arch: x86
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-          architecture: ${{ matrix.target }}
-      - name: Build wheel
+          architecture: ${{ matrix.python_arch }}
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --find-interpreter
           sccache: true
-      - name: Upload wheel
-        uses: actions/upload-artifact@v6
+      - name: Upload wheels
+        uses: actions/upload-artifact@v5
         with:
-          name: wheel-windows-${{ matrix.target }}
-          path: dist/*.whl
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
 
-  # ── Source distribution ───────────────────────────────────────────
+  # ── Source distribution ──────────────────────────────────────────
   build-sdist:
     name: Build (sdist)
     if: github.event_name != 'pull_request'
@@ -110,12 +147,12 @@ jobs:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v5
         with:
-          name: sdist
-          path: dist/*.tar.gz
+          name: wheels-sdist
+          path: dist
 
-  # ── Rust crate verification ──────────────────────────────────────
+  # ── Rust crate verification ─────────────────────────────────────
   build-crate:
     name: Build (crate)
     if: github.event_name != 'pull_request'
@@ -126,10 +163,10 @@ jobs:
       - name: Verify crate packages
         run: cargo package --list
 
-  # ── Gate: all builds must pass ───────────────────────────────────
+  # ── Gate: all builds must pass ──────────────────────────────────
   pre-merge:
     name: Pre-merge
-    needs: [build-linux, build-macos, build-windows, build-sdist, build-crate]
+    needs: [build-linux, build-musllinux, build-macos, build-windows, build-sdist, build-crate]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -141,6 +178,7 @@ jobs:
           fi
           results=(
             "${{ needs.build-linux.result }}"
+            "${{ needs.build-musllinux.result }}"
             "${{ needs.build-macos.result }}"
             "${{ needs.build-windows.result }}"
             "${{ needs.build-sdist.result }}"
