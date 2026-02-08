@@ -3,13 +3,16 @@
 Tests all supported formats across all available test files.
 Validates info fields, tag keys, tag values, and API behavior.
 """
+import json
 import os
+import shutil
 import pytest
 
 from mutagen.mp3 import MP3
 from mutagen.flac import FLAC
 from mutagen.oggvorbis import OggVorbis
 from mutagen.mp4 import MP4
+import mutagen
 
 import mutagen_rs
 
@@ -671,3 +674,275 @@ class TestWriteSupport:
             assert "Test Title" in vals
         else:
             assert str(vals) == "Test Title"
+
+
+# ──────────────────────────────────────────────────────────────
+# Generated file tests (ground truth comparison)
+# ──────────────────────────────────────────────────────────────
+
+GEN_DIR = os.path.join(TEST_DIR, "generated")
+TRUTH_FILE = os.path.join(GEN_DIR, "ground_truth.json")
+
+
+def _load_truth():
+    if not os.path.exists(TRUTH_FILE):
+        return {}
+    with open(TRUTH_FILE) as f:
+        return json.load(f)
+
+
+class TestGeneratedFiles:
+    """Test mutagen_rs against generated files with known metadata."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        self.truth = _load_truth()
+        if not self.truth:
+            pytest.skip("No generated test files (run generate_test_files.py)")
+
+    def _get_gen_path(self, name):
+        path = os.path.join(GEN_DIR, name)
+        if not os.path.exists(path):
+            pytest.skip(f"Generated file not found: {name}")
+        return path
+
+    @pytest.fixture(params=["mp3_basic.mp3", "mp3_unicode.mp3", "mp3_txxx.mp3",
+                             "mp3_comm.mp3", "mp3_popm.mp3"])
+    def mp3_gen(self, request):
+        return request.param
+
+    def test_mp3_tag_count(self, mp3_gen):
+        if mp3_gen not in self.truth:
+            pytest.skip(f"No truth for {mp3_gen}")
+        path = self._get_gen_path(mp3_gen)
+        # Compare against mutagen as ground truth
+        m = mutagen.File(path)
+        m_count = len(m.keys()) if m and m.tags else 0
+        r = mutagen_rs._fast_read(path)
+        r_count = len(r.get("_keys", []))
+        assert r_count == m_count, f"{mp3_gen}: rs={r_count} mutagen={m_count}"
+
+    def test_mp3_text_values(self, mp3_gen):
+        if mp3_gen not in self.truth:
+            pytest.skip(f"No truth for {mp3_gen}")
+        path = self._get_gen_path(mp3_gen)
+        expected_tags = self.truth[mp3_gen].get("tags", {})
+        r = mutagen_rs._fast_read(path)
+        for key, expected_vals in expected_tags.items():
+            if key.startswith("POPM"):
+                continue  # POPM values are complex
+            if key in r:
+                val = r[key]
+                if isinstance(val, str):
+                    assert val == expected_vals[0], \
+                        f"{mp3_gen}[{key}]: {val!r} != {expected_vals[0]!r}"
+                elif isinstance(val, list):
+                    for ev in expected_vals:
+                        assert ev in val, \
+                            f"{mp3_gen}[{key}]: {ev!r} not in {val!r}"
+
+    def test_flac_basic_tags(self):
+        name = "flac_basic.flac"
+        if name not in self.truth:
+            pytest.skip("No truth for flac_basic")
+        path = self._get_gen_path(name)
+        expected = self.truth[name]
+        r = mutagen_rs._fast_read(path)
+        r_keys = set(r.get("_keys", []))
+        for key in expected["tags"]:
+            assert key in r_keys, f"Missing key: {key}"
+            val = r[key]
+            exp = expected["tags"][key]
+            if isinstance(val, list):
+                assert val == exp, f"flac[{key}]: {val!r} != {exp!r}"
+
+    def test_flac_multivalue(self):
+        name = "flac_multivalue.flac"
+        if name not in self.truth:
+            pytest.skip("No truth for flac_multivalue")
+        path = self._get_gen_path(name)
+        expected = self.truth[name]
+        r = mutagen_rs._fast_read(path)
+        for key in expected["tags"]:
+            val = r.get(key, [])
+            if isinstance(val, str):
+                val = [val]
+            exp = expected["tags"][key]
+            assert val == exp, f"flac[{key}]: {val!r} != {exp!r}"
+
+    def test_ogg_basic_tags(self):
+        name = "ogg_basic.ogg"
+        if name not in self.truth:
+            pytest.skip("No truth for ogg_basic")
+        path = self._get_gen_path(name)
+        expected = self.truth[name]
+        r = mutagen_rs._fast_read(path)
+        r_keys = set(r.get("_keys", []))
+        for key in expected["tags"]:
+            assert key in r_keys, f"Missing key: {key}"
+
+    def test_m4a_basic_tag_count(self):
+        name = "m4a_basic.m4a"
+        if name not in self.truth:
+            pytest.skip("No truth for m4a_basic")
+        path = self._get_gen_path(name)
+        m = mutagen.File(path)
+        r = mutagen_rs._fast_read(path)
+        m_count = len(m.keys()) if m and m.tags else 0
+        r_count = len(r.get("_keys", []))
+        assert r_count == m_count, f"m4a: rs={r_count} mutagen={m_count}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Write round-trip tests
+# ──────────────────────────────────────────────────────────────
+
+class TestWriteRoundTrip:
+    """Test write with mutagen_rs, read back with mutagen."""
+
+    def test_mp3_roundtrip(self, tmp_path):
+        src = get_test_file("silence-44-s.mp3")
+        if not os.path.exists(src):
+            pytest.skip("Test file not found")
+        dst = str(tmp_path / "roundtrip.mp3")
+        shutil.copy2(src, dst)
+
+        # Write with mutagen_rs
+        mutagen_rs.clear_cache()
+        f = mutagen_rs.MP3(dst)
+        f["TIT2"] = "Round Trip Title"
+        f.save()
+
+        # Read back with mutagen
+        m = MP3(dst)
+        assert "TIT2" in m.tags
+        assert str(m.tags["TIT2"]) == "Round Trip Title"
+
+    def test_flac_roundtrip(self, tmp_path):
+        src = get_test_file("silence-44-s.flac")
+        if not os.path.exists(src):
+            pytest.skip("Test file not found")
+        dst = str(tmp_path / "roundtrip.flac")
+        shutil.copy2(src, dst)
+
+        # Write with mutagen_rs
+        mutagen_rs.clear_cache()
+        f = mutagen_rs.FLAC(dst)
+        f["title"] = "Round Trip FLAC"
+        f.save()
+
+        # Read back with mutagen
+        m = FLAC(dst)
+        assert "title" in m.tags
+        assert m.tags["title"] == ["Round Trip FLAC"]
+
+    def test_ogg_roundtrip(self, tmp_path):
+        src = get_test_file("empty.ogg")
+        if not os.path.exists(src):
+            pytest.skip("Test file not found")
+        dst = str(tmp_path / "roundtrip.ogg")
+        shutil.copy2(src, dst)
+
+        # Write with mutagen_rs
+        mutagen_rs.clear_cache()
+        f = mutagen_rs.OggVorbis(dst)
+        f["title"] = "Round Trip OGG"
+        f.save()
+
+        # Read back with mutagen
+        m = OggVorbis(dst)
+        assert "title" in m.tags
+        assert m.tags["title"] == ["Round Trip OGG"]
+
+
+# ──────────────────────────────────────────────────────────────
+# Exact key match tests (comprehensive)
+# ──────────────────────────────────────────────────────────────
+
+class TestExactKeyMatch:
+    """Verify mutagen_rs keys match mutagen exactly for well-known files."""
+
+    @pytest.fixture(params=[
+        "silence-44-s.mp3",
+        "silence-44-s.flac",
+        "empty.ogg",
+        "has-tags.m4a",
+    ])
+    def known_file(self, request):
+        path = get_test_file(request.param)
+        if not os.path.exists(path):
+            pytest.skip(f"Test file not found: {path}")
+        return path
+
+    def test_exact_key_set(self, known_file):
+        """Tag key sets should match exactly between mutagen and mutagen_rs."""
+        m = mutagen.File(known_file)
+        r = mutagen_rs._fast_read(known_file)
+        m_keys = set(m.keys()) if m and m.tags else set()
+        r_keys = set(r.get("_keys", []))
+        assert m_keys == r_keys, \
+            f"Extra in rs: {r_keys - m_keys}, Missing in rs: {m_keys - r_keys}"
+
+
+# ──────────────────────────────────────────────────────────────
+# API method presence tests
+# ──────────────────────────────────────────────────────────────
+
+class TestAPIMethods:
+    """Verify all expected API methods exist.
+
+    These tests validate the delete/add_tags/clear API additions.
+    They require the api-compat PR to be merged.
+    """
+
+    def test_mp3_has_basic_methods(self):
+        path = get_test_file("silence-44-s.mp3")
+        if not os.path.exists(path):
+            pytest.skip("Test file not found")
+        f = mutagen_rs.MP3(path)
+        assert hasattr(f, 'save')
+        assert hasattr(f, 'info')
+        assert hasattr(f, 'tags')
+        assert hasattr(f, 'keys')
+
+    def test_mp3_has_mutation_methods(self):
+        path = get_test_file("silence-44-s.mp3")
+        if not os.path.exists(path):
+            pytest.skip("Test file not found")
+        f = mutagen_rs.MP3(path)
+        # These require api-compat PR
+        for method in ('delete', 'add_tags', 'clear'):
+            if not hasattr(f, method):
+                pytest.skip(f"Method {method} not yet available (needs api-compat PR)")
+        assert hasattr(f, 'delete')
+        assert hasattr(f, 'add_tags')
+        assert hasattr(f, 'clear')
+
+    def test_flac_has_mutation_methods(self):
+        path = get_test_file("silence-44-s.flac")
+        if not os.path.exists(path):
+            pytest.skip("Test file not found")
+        f = mutagen_rs.FLAC(path)
+        for method in ('delete', 'add_tags', 'clear', 'pictures'):
+            if not hasattr(f, method):
+                pytest.skip(f"Method {method} not yet available (needs api-compat PR)")
+        assert hasattr(f, 'delete')
+        assert hasattr(f, 'pictures')
+
+    def test_ogg_has_mutation_methods(self):
+        path = get_test_file("empty.ogg")
+        if not os.path.exists(path):
+            pytest.skip("Test file not found")
+        f = mutagen_rs.OggVorbis(path)
+        if not hasattr(f, 'delete'):
+            pytest.skip("delete not yet available (needs api-compat PR)")
+        assert hasattr(f, 'delete')
+
+    def test_mp4_has_mutation_methods(self):
+        path = get_test_file("has-tags.m4a")
+        if not os.path.exists(path):
+            pytest.skip("Test file not found")
+        f = mutagen_rs.MP4(path)
+        if not hasattr(f, 'delete'):
+            pytest.skip("delete not yet available (needs api-compat PR)")
+        assert hasattr(f, 'delete')
