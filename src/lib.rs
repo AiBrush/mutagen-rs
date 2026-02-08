@@ -1660,7 +1660,7 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
 
         // Use index-based iteration with min_len to amortize rayon overhead.
         // Each rayon task processes at least 16 files sequentially.
-        // Bypass file cache — read directly, avoid RwLock + Arc + fstat overhead.
+        // Bypass file cache — read directly, avoid RwLock + HashMap + Arc overhead.
         (0..n).into_par_iter()
             .with_min_len(16)
             .filter_map(|i| {
