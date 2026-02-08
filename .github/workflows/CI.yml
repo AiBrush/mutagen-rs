@@ -5,8 +5,6 @@ on:
     branches:
       - main
       - master
-    tags:
-      - 'v*'
   pull_request:
   workflow_dispatch:
 
@@ -178,55 +176,3 @@ jobs:
         with:
           name: wheels-sdist
           path: dist
-
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [test, linux, musllinux, windows, macos, sdist]
-    permissions:
-      id-token: write
-      contents: write
-      attestations: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v6
-        with:
-          path: artifacts
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: 'artifacts/wheels-*/*'
-
-      # Publish to PyPI
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Publish to PyPI
-        run: uv publish 'artifacts/wheels-*/*'
-        env:
-          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-
-      # Publish to crates.io
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release
-      - name: Publish to crates.io
-        run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      # Create GitHub Release with all artifacts
-      - name: Collect release assets
-        run: |
-          mkdir -p release-assets
-          cp artifacts/wheels-*/* release-assets/
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: release-assets/*
