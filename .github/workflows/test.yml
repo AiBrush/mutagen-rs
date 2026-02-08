@@ -81,7 +81,7 @@ jobs:
   # ── Stage 2: Benchmarks (only if ALL tests pass) ──────────────────
   bench-python:
     name: Benchmark (Python)
-    needs: [test-python, test-rust]
+    needs: [test-python, test-rust, codeql]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -110,7 +110,7 @@ jobs:
 
   bench-rust:
     name: Benchmark (Rust)
-    needs: [test-python, test-rust]
+    needs: [test-python, test-rust, codeql]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
