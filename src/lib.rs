@@ -126,7 +126,7 @@ use pyo3::exceptions::{PyValueError, PyKeyError, PyIOError};
 
 // ---- Python Classes ----
 
-#[pyclass(name = "MPEGInfo")]
+#[pyclass(name = "MPEGInfo", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyMPEGInfo {
     #[pyo3(get)]
@@ -429,7 +429,7 @@ impl PyMP3 {
 }
 
 /// FLAC stream info.
-#[pyclass(name = "StreamInfo")]
+#[pyclass(name = "StreamInfo", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyStreamInfo {
     #[pyo3(get)]
@@ -475,7 +475,7 @@ impl PyStreamInfo {
 }
 
 /// VorbisComment-based tags (used by FLAC and OGG).
-#[pyclass(name = "VComment")]
+#[pyclass(name = "VComment", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyVComment {
     vc: vorbis::VorbisComment,
@@ -650,7 +650,7 @@ impl PyFLAC {
 }
 
 /// OGG Vorbis info.
-#[pyclass(name = "OggVorbisInfo")]
+#[pyclass(name = "OggVorbisInfo", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyOggVorbisInfo {
     #[pyo3(get)]
@@ -792,7 +792,7 @@ impl PyOggVorbis {
 }
 
 /// MP4 file info.
-#[pyclass(name = "MP4Info")]
+#[pyclass(name = "MP4Info", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyMP4Info {
     #[pyo3(get)]
@@ -829,7 +829,7 @@ impl PyMP4Info {
 }
 
 /// MP4 tags.
-#[pyclass(name = "MP4Tags")]
+#[pyclass(name = "MP4Tags", from_py_object)]
 #[derive(Debug, Clone)]
 struct PyMP4Tags {
     tags: mp4::MP4Tags,
@@ -1608,7 +1608,7 @@ unsafe fn batch_value_to_py_ffi(py: Python<'_>, bv: &BatchTagValue) -> *mut pyo3
 #[inline(always)]
 fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<Py<PyAny>> {
     unsafe {
-        let inner = pyo3::ffi::_PyDict_NewPresized(6);
+        let inner = pyo3::ffi::PyDict_New();
         if inner.is_null() {
             return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
         }
@@ -1621,7 +1621,7 @@ fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<
         // Direct VC→Python FFI path: skip Rust String intermediary for lazy VC
         if pf.tags.is_empty() {
             if let Some(ref vc_bytes) = pf.lazy_vc {
-                let tags_dict = pyo3::ffi::_PyDict_NewPresized(16);
+                let tags_dict = pyo3::ffi::PyDict_New();
                 if !tags_dict.is_null() {
                     parse_vc_to_ffi_dict(vc_bytes, tags_dict);
                     pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
@@ -1629,14 +1629,14 @@ fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<
                 }
             } else {
                 // Empty tags
-                let tags_dict = pyo3::ffi::_PyDict_NewPresized(0);
+                let tags_dict = pyo3::ffi::PyDict_New();
                 if !tags_dict.is_null() {
                     pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
                     pyo3::ffi::Py_DECREF(tags_dict);
                 }
             }
         } else {
-            let tags_dict = pyo3::ffi::_PyDict_NewPresized(pf.tags.len() as pyo3::ffi::Py_ssize_t);
+            let tags_dict = pyo3::ffi::PyDict_New();
             if !tags_dict.is_null() {
                 for (key, value) in &pf.tags {
                     let key_ptr = intern_tag_key(key.as_bytes());
@@ -1652,7 +1652,7 @@ fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<
                 pyo3::ffi::Py_DECREF(tags_dict);
             }
         }
-        Ok(Py::from_owned_ptr(py, inner))
+        Ok(Bound::from_owned_ptr(py, inner).unbind())
     }
 }
 
@@ -1900,8 +1900,8 @@ impl PyBatchResult {
             unsafe {
                 let copy = pyo3::ffi::PyDict_Copy(self.dicts[i].as_ptr());
                 if copy.is_null() { continue; }
-                let dict_obj = Py::<PyAny>::from_owned_ptr(py, copy);
-                let tuple = PyTuple::new(py, &[p.as_str().into_pyobject(py)?.into_any(), dict_obj.bind(py).clone().into_any()])?;
+                let dict_obj = Bound::from_owned_ptr(py, copy);
+                let tuple = PyTuple::new(py, &[p.as_str().into_pyobject(py)?.into_any(), dict_obj.into_any()])?;
                 list.append(tuple)?;
             }
         }
@@ -2174,7 +2174,7 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
 
     // Build native Python dict with dict-level dedup (one materialization per unique file)
     unsafe {
-        let result_ptr = pyo3::ffi::_PyDict_NewPresized(file_indices.len() as pyo3::ffi::Py_ssize_t);
+        let result_ptr = pyo3::ffi::PyDict_New();
         if result_ptr.is_null() {
             return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
         }
@@ -2203,7 +2203,7 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
             pyo3::ffi::Py_DECREF(*ptr);
         }
 
-        Ok(Py::from_owned_ptr(py, result_ptr))
+        Ok(Bound::from_owned_ptr(py, result_ptr).unbind())
     }
 }
 
@@ -2264,13 +2264,13 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
 
     // Phase 2: Serial dict creation using raw FFI (under GIL)
     unsafe {
-        let result_ptr = pyo3::ffi::_PyDict_NewPresized(parsed.len() as pyo3::ffi::Py_ssize_t);
+        let result_ptr = pyo3::ffi::PyDict_New();
         if result_ptr.is_null() {
             return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
         }
 
         for (path, pf) in &parsed {
-            let dict_ptr = pyo3::ffi::_PyDict_NewPresized(20);
+            let dict_ptr = pyo3::ffi::PyDict_New();
             if dict_ptr.is_null() { continue; }
 
             // Info fields via raw FFI
@@ -2319,7 +2319,7 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
             pyo3::ffi::Py_DECREF(dict_ptr);
         }
 
-        Ok(Py::from_owned_ptr(py, result_ptr))
+        Ok(Bound::from_owned_ptr(py, result_ptr).unbind())
     }
 }
 
@@ -3869,7 +3869,7 @@ fn _fast_info(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
     let data = read_cached(filename)
         .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
     let dict: Bound<'_, PyDict> = unsafe {
-        let ptr = pyo3::ffi::_PyDict_NewPresized(8);
+        let ptr = pyo3::ffi::PyDict_New();
         if ptr.is_null() {
             return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
         }
@@ -3907,14 +3907,14 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
             // Shallow copy: O(n) but ~20ns per item, total ~200ns for typical metadata
             let copy = unsafe { pyo3::ffi::PyDict_Copy(cached.as_ptr()) };
             if !copy.is_null() {
-                return Ok(unsafe { Py::from_owned_ptr(py, copy) });
+                return Ok(unsafe { Bound::from_owned_ptr(py, copy).unbind() });
             }
         }
     }
 
     // Pre-size dict: ~12 info fields + ~8 tag entries typical
     let dict: Bound<'_, PyDict> = unsafe {
-        let ptr = pyo3::ffi::_PyDict_NewPresized(20);
+        let ptr = pyo3::ffi::PyDict_New();
         if ptr.is_null() {
             return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
         }
@@ -3979,7 +3979,7 @@ fn _fast_read_seq(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>>
                 Err(_) => continue,
             };
 
-            let dict_ptr_raw = pyo3::ffi::_PyDict_NewPresized(20);
+            let dict_ptr_raw = pyo3::ffi::PyDict_New();
             if dict_ptr_raw.is_null() { continue; }
             let dict: Bound<'_, PyDict> = Bound::from_owned_ptr(py, dict_ptr_raw).cast_into_unchecked();
             let ext = filename.rsplit('.').next().unwrap_or("");
