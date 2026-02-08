@@ -2,13 +2,30 @@
 name = "mutagen-rs"
 version = "0.1.0"
 edition = "2021"
+description = "High-performance audio metadata library — drop-in replacement for mutagen"
+license = "MIT"
+repository = "https://github.com/AiBrush/mutagen-rs"
+readme = "README.md"
+keywords = ["audio", "metadata", "id3", "flac", "mp3"]
+categories = ["multimedia::audio", "parser-implementations"]
+exclude = [
+    "test_files/",
+    "tests/",
+    "benches/",
+    "lofty-rs/",
+    "python/",
+    ".github/",
+    "baseline_results.json",
+    "performance_results.json",
+    "task.md",
+]
 
 [lib]
 name = "mutagen_rs"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["python"]
+default = []
 python = ["dep:pyo3"]
 
 [dependencies]
@@ -29,7 +46,7 @@ mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-lofty = { path = "lofty-rs/lofty" }
+lofty = "0.22"
 
 [[bench]]
 name = "parse_comparison"

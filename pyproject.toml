@@ -34,3 +34,4 @@ Issues = "https://github.com/AiBrush/mutagen-rs/issues"
 
 [tool.maturin]
 python-source = "python"
+features = ["pyo3/extension-module", "python"]
