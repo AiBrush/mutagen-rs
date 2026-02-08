@@ -1900,7 +1900,7 @@ fn batch_open_io(filenames: &[String], exts: &[&str]) -> Vec<(usize, Arc<PreSeri
                     libc::stat(c_names[i].as_ptr(), &mut stat_buf)
                 }
             };
-            if rc == 0 { stat_buf.st_size } else { -1 }
+            if rc == 0 { stat_buf.st_size as i64 } else { -1 }
         })
         .collect();
 
