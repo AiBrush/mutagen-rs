@@ -3068,12 +3068,22 @@ fn fast_walk_v22_frames(
     while *offset + 6 <= tag_bytes.len() {
         if tag_bytes[*offset] == 0 { break; }
         let id_bytes = &tag_bytes[*offset..*offset+3];
-        if !id_bytes.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) { break; }
+        if !id_bytes.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            *offset += 1;
+            while *offset + 6 <= tag_bytes.len() {
+                if tag_bytes[*offset] == 0 { break; }
+                let next_id = &tag_bytes[*offset..*offset+3];
+                if next_id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) { break; }
+                *offset += 1;
+            }
+            continue;
+        }
         let size = ((tag_bytes[*offset+3] as usize) << 16)
             | ((tag_bytes[*offset+4] as usize) << 8)
             | (tag_bytes[*offset+5] as usize);
         *offset += 6;
-        if size == 0 || *offset + size > tag_bytes.len() { break; }
+        if size == 0 { continue; }
+        if *offset + size > tag_bytes.len() { break; }
         let frame_data = &tag_bytes[*offset..*offset+size];
         *offset += size;
 
@@ -3180,11 +3190,22 @@ fn fast_walk_v2x_frames(
     while *offset + 10 <= tag_bytes.len() {
         if tag_bytes[*offset] == 0 { break; }
         let id_bytes = &tag_bytes[*offset..*offset+4];
-        if !id_bytes.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) { break; }
+        if !id_bytes.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            // Scan forward for next valid frame header
+            *offset += 1;
+            while *offset + 10 <= tag_bytes.len() {
+                if tag_bytes[*offset] == 0 { break; }
+                let next_id = &tag_bytes[*offset..*offset+4];
+                if next_id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) { break; }
+                *offset += 1;
+            }
+            continue;
+        }
         let size = id3::header::BitPaddedInt::decode(&tag_bytes[*offset+4..*offset+8], bpi) as usize;
         let flags = u16::from_be_bytes([tag_bytes[*offset+8], tag_bytes[*offset+9]]);
         *offset += 10;
-        if size == 0 || *offset + size > tag_bytes.len() { break; }
+        if size == 0 { continue; }
+        if *offset + size > tag_bytes.len() { break; }
 
         let (compressed, encrypted, unsynchronised, has_data_length) = if version == 4 {
             (flags & 0x0008 != 0, flags & 0x0004 != 0, flags & 0x0002 != 0, flags & 0x0001 != 0)
@@ -3200,11 +3221,9 @@ fn fast_walk_v2x_frames(
             *offset += size;
 
             // Simple text frames: zero-alloc direct to Python
-            // For duplicates: merge values like mutagen (extends text list)
             if id_bytes[0] == b'T' && id_str != "TXXX" && id_str != "TIPL" && id_str != "TMCL" && id_str != "IPLS" {
                 unsafe {
                     if let Some(py_ptr) = try_text_frame_to_py(frame_data) {
-                        // TCON: resolve genre references
                         let final_ptr = if id_bytes == b"TCON" {
                             let py_str = pyo3::ffi::PyUnicode_AsUTF8(py_ptr);
                             if !py_str.is_null() {
@@ -3219,11 +3238,9 @@ fn fast_walk_v2x_frames(
                             } else { py_ptr }
                         } else { py_ptr };
                         if final_ptr.is_null() { continue; }
-                        // TYER normalization: store as TDRC only (mutagen normalizes TYER to TDRC)
                         let is_tyer = id_bytes == b"TYER";
                         let key_ptr = if is_tyer {
                             let tdrc_key = intern_tag_key(b"TDRC");
-                            // If TDRC already exists, skip TYER entirely
                             if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) != 0 {
                                 pyo3::ffi::Py_DECREF(tdrc_key);
                                 pyo3::ffi::Py_DECREF(final_ptr);
@@ -3238,7 +3255,6 @@ fn fast_walk_v2x_frames(
                             pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, final_ptr);
                             key_ptrs.push(key_ptr);
                         } else {
-                            // Merge: append to existing value
                             if pyo3::ffi::PyList_Check(existing) != 0 {
                                 pyo3::ffi::PyList_Append(existing, final_ptr);
                             } else {
@@ -3299,7 +3315,12 @@ fn fast_walk_v2x_frames(
                     Err(_) => continue,
                 };
             }
-            if compressed { continue; }
+            if compressed {
+                frame_data = match id3::tags::decompress_zlib(&frame_data) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+            }
 
             if let Ok(frame) = id3::frames::parse_frame(id_str, &frame_data) {
                 emit_frame_to_dict(py, &frame, id_str, dict_ptr, key_ptrs);

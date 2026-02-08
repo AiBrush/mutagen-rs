@@ -118,53 +118,52 @@ impl ID3Header {
 /// Some encoders (notably iTunes) incorrectly use normal integers instead of syncsafe.
 /// This function heuristically determines which encoding is used.
 pub fn determine_bpi(data: &[u8], frames_end: usize) -> u8 {
-    // Try both interpretations and see which one gives valid frame boundaries
-    let mut pos_syncsafe = 0usize;
-    let mut pos_normal = 0usize;
-    let mut syncsafe_valid = 0u32;
-    let mut normal_valid = 0u32;
-
+    // Matches mutagen's determine_bpi: try both interpretations, count known frames,
+    // track overshoot. Handles zero-size frames and non-ASCII IDs gracefully.
     let end = frames_end.min(data.len());
+    let empty10 = [0u8; 10];
 
-    while pos_syncsafe + 10 <= end && pos_syncsafe < end.saturating_sub(10) {
-        if data[pos_syncsafe] == 0 {
+    // Pass 1: syncsafe (BPI) interpretation
+    let mut o = 0usize;
+    let mut asbpi = 0u32;
+    let bpioff;
+    loop {
+        if o + 10 > end { bpioff = o as i64 - end as i64; break; }
+        if data[o..o + 10] == empty10 {
+            bpioff = -(((end - o) % 10) as i64);
             break;
         }
-        // Check if frame ID is valid (uppercase ASCII or digits)
-        let id = &data[pos_syncsafe..pos_syncsafe + 4];
-        if !id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
-            break;
+        let size = BitPaddedInt::syncsafe(&data[o + 4..o + 8]) as usize;
+        o += 10 + size;
+        let id = &data[o - 10 - size..o - 10 - size + 4];
+        if id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            asbpi += 1;
         }
-        let size = BitPaddedInt::syncsafe(&data[pos_syncsafe + 4..pos_syncsafe + 8]) as usize;
-        if size == 0 || pos_syncsafe + 10 + size > end {
-            break;
-        }
-        syncsafe_valid += 1;
-        pos_syncsafe += 10 + size;
     }
 
-    while pos_normal + 10 <= end && pos_normal < end.saturating_sub(10) {
-        if data[pos_normal] == 0 {
+    // Pass 2: normal (int) interpretation
+    let mut o = 0usize;
+    let mut asint = 0u32;
+    let intoff;
+    loop {
+        if o + 10 > end { intoff = o as i64 - end as i64; break; }
+        if data[o..o + 10] == empty10 {
+            intoff = -(((end - o) % 10) as i64);
             break;
         }
-        let id = &data[pos_normal..pos_normal + 4];
-        if !id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
-            break;
+        let size = BitPaddedInt::normal(&data[o + 4..o + 8]) as usize;
+        o += 10 + size;
+        let id = &data[o - 10 - size..o - 10 - size + 4];
+        if id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+            asint += 1;
         }
-        let size = BitPaddedInt::normal(&data[pos_normal + 4..pos_normal + 8]) as usize;
-        if size == 0 || pos_normal + 10 + size > end {
-            break;
-        }
-        normal_valid += 1;
-        pos_normal += 10 + size;
     }
 
-    // If syncsafe parsed more frames successfully, use syncsafe (7)
-    // Otherwise use normal (8)
-    if syncsafe_valid >= normal_valid {
-        7
-    } else {
+    // Match mutagen: prefer int if more tags, or equal counts but bpi overshoots
+    if asint > asbpi || (asint == asbpi && bpioff >= 1 && intoff <= 1) {
         8
+    } else {
+        7
     }
 }
 
