@@ -1787,18 +1787,21 @@ fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
 /// Uses HashMap for O(1) path lookup instead of O(n) linear search.
 #[pyclass(name = "BatchResult")]
 struct PyBatchResult {
-    files: Vec<(String, Arc<PreSerializedFile>)>,
-    index: HashMap<String, usize>,  // path → index in files Vec
+    paths: Vec<String>,
+    /// Pre-materialized dict templates (one per dedup group, shared via clone_ref).
+    /// __getitem__ returns PyDict_Copy of these — no Mutex, no HashMap lookup.
+    dicts: Vec<Py<PyAny>>,
+    index: HashMap<String, usize>,
 }
 
 #[pymethods]
 impl PyBatchResult {
     fn __len__(&self) -> usize {
-        self.files.len()
+        self.paths.len()
     }
 
     fn keys(&self) -> Vec<String> {
-        self.files.iter().map(|(p, _)| p.clone()).collect()
+        self.paths.clone()
     }
 
     fn __contains__(&self, path: &str) -> bool {
@@ -1807,61 +1810,41 @@ impl PyBatchResult {
 
     fn __getitem__(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
         if let Some(&idx) = self.index.get(path) {
-            let (_, pf) = &self.files[idx];
-            return preserialized_to_py_dict(py, pf);
+            return Ok(self.dicts[idx].clone_ref(py));
         }
         Err(PyKeyError::new_err(path.to_string()))
     }
 
     fn items(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
-        for (p, pf) in &self.files {
-            let dict = preserialized_to_py_dict(py, pf)?;
-            let tuple = PyTuple::new(py, &[p.as_str().into_pyobject(py)?.into_any(), dict.bind(py).clone().into_any()])?;
-            list.append(tuple)?;
+        for (i, p) in self.paths.iter().enumerate() {
+            unsafe {
+                let copy = pyo3::ffi::PyDict_Copy(self.dicts[i].as_ptr());
+                if copy.is_null() { continue; }
+                let dict_obj = Py::<PyAny>::from_owned_ptr(py, copy);
+                let tuple = PyTuple::new(py, &[p.as_str().into_pyobject(py)?.into_any(), dict_obj.bind(py).clone().into_any()])?;
+                list.append(tuple)?;
+            }
         }
         Ok(list.into_any().unbind())
-    }
-
-    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // Materialize everything as a dict using orjson for speed
-        let mut json = String::with_capacity(self.files.len() * 600);
-        json.push('{');
-        let mut first = true;
-        for (path, pf) in &self.files {
-            if !first { json.push(','); }
-            first = false;
-            json_escape_to(path, &mut json);
-            json.push(':');
-            preserialized_to_json(pf, &mut json);
-        }
-        json.push('}');
-
-        let loads_fn = py.import("orjson")
-            .and_then(|m| m.getattr("loads"))
-            .or_else(|_| py.import("json").and_then(|m| m.getattr("loads")))?;
-        let json_bytes = PyBytes::new(py, json.as_bytes());
-        let result = loads_fn.call1((json_bytes,))?;
-        Ok(result.into_any().unbind())
     }
 }
 
 /// Batch open: read and parse multiple files in parallel using rayon.
-/// Returns a lazy PyBatchResult that materializes dicts on demand (better GC behavior).
+/// Returns a native Python dict (path → metadata dict) for zero-overhead iteration.
+/// Uses content-based dedup + dict sharing for duplicate files.
 ///
-/// For large files (>32KB), uses mmap to avoid reading unused audio data
-/// (e.g., OGG parser only accesses headers + last 8KB of a 136KB file).
+/// For large files (>32KB), uses mmap to avoid reading unused audio data.
 #[pyfunction]
-fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult> {
+fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
     use rayon::prelude::*;
 
     let files: Vec<(String, Arc<PreSerializedFile>)> = py.detach(|| {
         let n = filenames.len();
         if n == 0 { return Vec::new(); }
 
-        // Content-based dedup cache: files with same size + first 64 bytes are parsed once.
-        // Uses Arc to avoid deep-cloning tag Strings for duplicate files.
-        let dedup: std::sync::RwLock<HashMap<(u64, [u8; 64]), Arc<PreSerializedFile>>> =
+        // Content-based dedup: first 64 bytes as fingerprint (no fstat for dedup hits).
+        let dedup: std::sync::RwLock<HashMap<[u8; 64], Arc<PreSerializedFile>>> =
             std::sync::RwLock::new(HashMap::with_capacity(n / 4));
 
         (0..n).into_par_iter()
@@ -1871,27 +1854,24 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
                 let path = &filenames[i];
                 let ext = path.rsplit('.').next().unwrap_or("");
                 let mut file = std::fs::File::open(path).ok()?;
-                let meta = file.metadata().ok()?;
-                let file_len = meta.len();
 
-                // Read first 64 bytes for dedup check
+                // Read first 64 bytes for dedup check (skip fstat — not needed for hits)
                 let mut header = [0u8; 64];
                 let hdr_n = file.read(&mut header).ok()?;
                 if hdr_n == 0 { return None; }
-                let dedup_key = (file_len, header);
 
-                // Check dedup cache (concurrent read lock, Arc::clone is ~20ns vs deep clone ~700ns)
+                // Check dedup cache (concurrent read lock)
                 {
                     if let Ok(cache) = dedup.read() {
-                        if let Some(pf) = cache.get(&dedup_key) {
+                        if let Some(pf) = cache.get(&header) {
                             return Some((path.clone(), Arc::clone(pf)));
                         }
                     }
                 }
 
-                // Cache miss — seek back and parse fully
+                // Cache miss — get file size and read fully
+                let file_len = file.metadata().ok()?.len() as usize;
                 file.seek(std::io::SeekFrom::Start(0)).ok()?;
-                let file_len = file_len as usize;
 
                 // FLAC: partial read — metadata (StreamInfo + VC) is at file start.
                 let pf = if ext.eq_ignore_ascii_case("flac") && file_len > 4096 {
@@ -1923,9 +1903,8 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
                 }?;
 
                 let pf = Arc::new(pf);
-                // Insert into dedup cache (write lock — brief, only for unique files)
                 if let Ok(mut cache) = dedup.write() {
-                    cache.insert(dedup_key, Arc::clone(&pf));
+                    cache.insert(header, Arc::clone(&pf));
                 }
 
                 Some((path.clone(), pf))
@@ -1933,12 +1912,38 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
             .collect()
     });
 
-    // Build O(1) index for __getitem__ lookups
-    let index: HashMap<String, usize> = files.iter().enumerate()
-        .map(|(i, (path, _))| (path.clone(), i))
-        .collect();
+    // Build native Python dict with dict-level dedup (one materialization per unique file)
+    unsafe {
+        let result_ptr = pyo3::ffi::_PyDict_NewPresized(files.len() as pyo3::ffi::Py_ssize_t);
+        if result_ptr.is_null() {
+            return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
+        }
 
-    Ok(PyBatchResult { files, index })
+        let mut mat_cache: HashMap<usize, *mut pyo3::ffi::PyObject> = HashMap::new();
+
+        for (path, pf) in &files {
+            let cache_key = Arc::as_ptr(pf) as usize;
+            let dict_ptr = if let Some(&cached) = mat_cache.get(&cache_key) {
+                cached
+            } else {
+                let d = preserialized_to_py_dict(py, pf)?.into_ptr();
+                mat_cache.insert(cache_key, d);
+                d
+            };
+
+            let path_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                path.as_ptr() as *const std::ffi::c_char, path.len() as pyo3::ffi::Py_ssize_t);
+            pyo3::ffi::PyDict_SetItem(result_ptr, path_ptr, dict_ptr);
+            pyo3::ffi::Py_DECREF(path_ptr);
+        }
+
+        // Release materialization cache references
+        for (_, ptr) in &mat_cache {
+            pyo3::ffi::Py_DECREF(*ptr);
+        }
+
+        Ok(Py::from_owned_ptr(py, result_ptr))
+    }
 }
 
 /// Fast batch read: parallel I/O + parse, then raw FFI dict creation.
@@ -1949,12 +1954,12 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
     use rayon::prelude::*;
 
     // Phase 1: Parallel read + parse (outside GIL)
-    // Content-based dedup: files with same size + first 64 bytes are parsed once.
+    // Content-based dedup: first 64 bytes as fingerprint (no fstat for dedup hits).
     let parsed: Vec<(String, PreSerializedFile)> = py.detach(|| {
         let n = filenames.len();
         if n == 0 { return Vec::new(); }
 
-        let dedup: std::sync::RwLock<HashMap<(u64, [u8; 64]), PreSerializedFile>> =
+        let dedup: std::sync::RwLock<HashMap<[u8; 64], PreSerializedFile>> =
             std::sync::RwLock::new(HashMap::with_capacity(n / 4));
 
         (0..n).into_par_iter()
@@ -1963,24 +1968,21 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
                 use std::io::{Read, Seek};
                 let path = &filenames[i];
                 let mut file = std::fs::File::open(path).ok()?;
-                let meta = file.metadata().ok()?;
-                let file_len = meta.len();
 
                 let mut header = [0u8; 64];
                 let hdr_n = file.read(&mut header).ok()?;
                 if hdr_n == 0 { return None; }
-                let dedup_key = (file_len, header);
 
                 {
                     if let Ok(cache) = dedup.read() {
-                        if let Some(pf) = cache.get(&dedup_key) {
+                        if let Some(pf) = cache.get(&header) {
                             return Some((path.clone(), pf.clone()));
                         }
                     }
                 }
 
+                let file_len = file.metadata().ok()?.len() as usize;
                 file.seek(std::io::SeekFrom::Start(0)).ok()?;
-                let file_len = file_len as usize;
                 let pf = if file_len > 32768 {
                     let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
                     parse_and_serialize(&mmap, path)
@@ -1991,7 +1993,7 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
                 }?;
 
                 if let Ok(mut cache) = dedup.write() {
-                    cache.insert(dedup_key, pf.clone());
+                    cache.insert(header, pf.clone());
                 }
 
                 Some((path.clone(), pf))
@@ -2195,7 +2197,7 @@ fn clear_cache(_py: Python<'_>) {
 
 /// Alias for batch_open (used by benchmark scripts).
 #[pyfunction]
-fn _rust_batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult> {
+fn _rust_batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
     batch_open(py, filenames)
 }
 
