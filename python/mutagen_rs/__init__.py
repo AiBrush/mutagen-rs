@@ -95,7 +95,7 @@ class _CachedFile(dict):
     Tags stored as dict entries for C-level __getitem__ (~50ns).
     Metadata stored as slot attributes for fast access.
     """
-    __slots__ = ('info', 'filename', '_native', '_tag_keys')
+    __slots__ = ('info', 'filename', '_native', '_tag_keys', '_pictures')
 
     @property
     def tags(self):
@@ -103,32 +103,12 @@ class _CachedFile(dict):
             return self._native.tags
         return self
 
-    def save(self, *args, **kwargs):
-        if self._native is not None:
-            self._native.save(*args, **kwargs)
-            _cache.pop(self.filename, None)
-            _rust_clear_cache()
-            return
-        # Fast path had no native object — construct one on demand for saving
-        ext = self.filename.rsplit('.', 1)[-1].lower()
-        if ext == 'mp3':
-            native = _RustMP3(self.filename)
-        elif ext == 'flac':
-            native = _RustFLAC(self.filename)
-        elif ext == 'ogg':
-            native = _RustOggVorbis(self.filename)
-        elif ext in ('m4a', 'mp4', 'aac'):
-            native = _RustMP4(self.filename)
-        else:
-            raise NotImplementedError(f"Save not supported for .{ext}")
-        # Apply all tags (including user-modified keys) to native object
-        for k in dict.keys(self):
-            v = dict.__getitem__(self, k)
-            if v is not None:
-                native[k] = v
-        native.save(*args, **kwargs)
-        _cache.pop(self.filename, None)
-        _rust_clear_cache()  # Invalidate Rust file/result caches so re-reads see new data
+    @property
+    def pictures(self):
+        """FLAC pictures (list of dicts with type, mime, desc, width, height, data)."""
+        if self._native is not None and hasattr(self._native, 'pictures'):
+            return self._native.pictures
+        return getattr(self, '_pictures', [])
 
     def _get_native(self):
         """Get or create a native Rust object for mutation operations."""
@@ -145,12 +125,39 @@ class _CachedFile(dict):
             return _RustMP4(self.filename)
         raise NotImplementedError(f"Not supported for .{ext}")
 
+    def save(self, *args, **kwargs):
+        if self._native is not None:
+            self._native.save(*args, **kwargs)
+            _cache.pop(self.filename, None)
+            _rust_clear_cache()
+            return
+        native = self._get_native()
+        for k in dict.keys(self):
+            v = dict.__getitem__(self, k)
+            if v is not None:
+                native[k] = v
+        native.save(*args, **kwargs)
+        _cache.pop(self.filename, None)
+        _rust_clear_cache()
+
     def delete(self):
         """Delete all tags from the file."""
         native = self._get_native()
         native.delete()
         _cache.pop(self.filename, None)
         _rust_clear_cache()
+
+    def add_tags(self):
+        """Ensure tag container exists."""
+        if self._native is not None and hasattr(self._native, 'add_tags'):
+            self._native.add_tags()
+
+    def clear(self):
+        """Remove all tags from memory (does not write to file)."""
+        dict.clear(self)
+        self._tag_keys = []
+        if self._native is not None and hasattr(self._native, 'clear'):
+            self._native.clear()
 
     def pprint(self):
         if self._native is not None:
@@ -172,6 +179,7 @@ def _make_cached(native, filename):
     w._native = native
     w.info = native.info
     w.filename = filename
+    w._pictures = []
     tag_keys = native.keys()
     w._tag_keys = tag_keys
     for k in tag_keys:
@@ -188,6 +196,7 @@ def _make_cached_fast(d, filename):
     w._native = None
     w.info = _InfoProxy(d)
     w.filename = filename
+    w._pictures = d.get('_pictures', [])
     tag_keys = d.get('_keys', [])
     w._tag_keys = tag_keys
     for k in tag_keys:

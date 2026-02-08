@@ -1,5 +1,5 @@
 use crate::common::error::Result;
-use crate::id3::frames::{Frame, TextFrame};
+use crate::id3::frames::{Frame, TextFrame, CommentFrame};
 use crate::id3::specs::{self, Encoding, GENRES};
 
 /// Check if file data ends with an ID3v1 tag.
@@ -80,10 +80,12 @@ pub fn parse_id3v1(data: &[u8]) -> Result<Vec<Frame>> {
         // ID3v1.1 - has track number
         let comment = decode_v1_string(&tag_data[97..125]);
         if !comment.is_empty() {
-            frames.push(Frame::Text(TextFrame {
+            frames.push(Frame::Comment(CommentFrame {
                 id: "COMM".to_string(),
                 encoding: Encoding::Latin1,
-                text: vec![comment],
+                lang: "eng".to_string(),
+                desc: "ID3v1 Comment".to_string(),
+                text: comment,
             }));
         }
 
@@ -96,10 +98,12 @@ pub fn parse_id3v1(data: &[u8]) -> Result<Vec<Frame>> {
     } else {
         let comment = decode_v1_string(&tag_data[97..127]);
         if !comment.is_empty() {
-            frames.push(Frame::Text(TextFrame {
+            frames.push(Frame::Comment(CommentFrame {
                 id: "COMM".to_string(),
                 encoding: Encoding::Latin1,
-                text: vec![comment],
+                lang: "eng".to_string(),
+                desc: "ID3v1 Comment".to_string(),
+                text: comment,
             }));
         }
     }

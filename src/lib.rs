@@ -423,6 +423,23 @@ impl PyMP3 {
         self.id3.save(Some(&self.filename))
     }
 
+    fn delete(&self) -> PyResult<()> {
+        self.id3.delete(Some(&self.filename))
+    }
+
+    fn add_tags(&self) -> PyResult<()> {
+        // MP3 always has ID3 tags after construction
+        Ok(())
+    }
+
+    fn clear(&mut self, py: Python) -> PyResult<()> {
+        self.id3.tags.frames.clear();
+        self.tag_keys.clear();
+        let dict = self.tag_dict.bind(py);
+        dict.clear();
+        Ok(())
+    }
+
     fn pprint(&self) -> String {
         format!("{}\n{}", self.info.pprint(), self.id3.pprint())
     }
@@ -647,6 +664,73 @@ impl PyFLAC {
         self.flac_file.save()?;
         Ok(())
     }
+
+    #[getter]
+    fn pictures(&self, py: Python) -> PyResult<Py<PyList>> {
+        let mut pics = Vec::new();
+        // Resolve lazy pictures from the file data
+        for lp in &self.flac_file.lazy_pictures {
+            let data = std::fs::read(&self.filename)
+                .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+            if lp.block_offset + lp.block_size <= data.len() {
+                if let Ok(pic) = flac::FLACPicture::parse(&data[lp.block_offset..lp.block_offset + lp.block_size]) {
+                    let dict = PyDict::new(py);
+                    let _ = dict.set_item("type", pic.pic_type);
+                    let _ = dict.set_item("mime", &pic.mime);
+                    let _ = dict.set_item("desc", &pic.desc);
+                    let _ = dict.set_item("width", pic.width);
+                    let _ = dict.set_item("height", pic.height);
+                    let _ = dict.set_item("depth", pic.depth);
+                    let _ = dict.set_item("colors", pic.colors);
+                    let _ = dict.set_item("data", pyo3::types::PyBytes::new(py, &pic.data));
+                    pics.push(dict.into_any().unbind());
+                }
+            }
+        }
+        // Also include already-parsed pictures
+        for pic in &self.flac_file.pictures {
+            let dict = PyDict::new(py);
+            let _ = dict.set_item("type", pic.pic_type);
+            let _ = dict.set_item("mime", &pic.mime);
+            let _ = dict.set_item("desc", &pic.desc);
+            let _ = dict.set_item("width", pic.width);
+            let _ = dict.set_item("height", pic.height);
+            let _ = dict.set_item("depth", pic.depth);
+            let _ = dict.set_item("colors", pic.colors);
+            let _ = dict.set_item("data", pyo3::types::PyBytes::new(py, &pic.data));
+            pics.push(dict.into_any().unbind());
+        }
+        Ok(PyList::new(py, pics)?.unbind())
+    }
+
+    fn delete(&self) -> PyResult<()> {
+        // Delete all FLAC tags by clearing VC and pictures, then saving
+        let mut flac_file = flac::FLACFile::open(&self.filename)
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        flac_file.tags = Some(vorbis::VorbisComment::new());
+        flac_file.pictures.clear();
+        flac_file.lazy_pictures.clear();
+        flac_file.save()
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        Ok(())
+    }
+
+    fn add_tags(&mut self) -> PyResult<()> {
+        // Ensure tags exist (FLAC always has a VC block)
+        self.flac_file.ensure_tags();
+        Ok(())
+    }
+
+    fn clear(&mut self, py: Python) -> PyResult<()> {
+        self.vc_data = vorbis::VorbisComment::new();
+        self.tag_keys.clear();
+        let dict = self.tag_dict.bind(py);
+        dict.clear();
+        if let Some(ref mut tags) = self.flac_file.tags {
+            *tags = vorbis::VorbisComment::new();
+        }
+        Ok(())
+    }
 }
 
 /// OGG Vorbis info.
@@ -787,6 +871,29 @@ impl PyOggVorbis {
         ogg_file.tags = self.vc.vc.clone();
         ogg_file.save()
             .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        Ok(())
+    }
+
+    fn delete(&self) -> PyResult<()> {
+        let data = read_cached(&self.filename)
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        let mut ogg_file = ogg::OggVorbisFile::parse(&data, &self.filename)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        ogg_file.tags = vorbis::VorbisComment::new();
+        ogg_file.save()
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        Ok(())
+    }
+
+    fn add_tags(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn clear(&mut self, py: Python) -> PyResult<()> {
+        self.vc.vc = vorbis::VorbisComment::new();
+        self.tag_keys.clear();
+        let dict = self.tag_dict.bind(py);
+        dict.clear();
         Ok(())
     }
 }
@@ -998,6 +1105,18 @@ impl PyMP4 {
 
     fn __repr__(&self) -> String {
         format!("MP4(filename={:?})", self.filename)
+    }
+
+    fn add_tags(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn clear(&mut self, py: Python) -> PyResult<()> {
+        self.mp4_tags.tags.items.clear();
+        self.tag_keys.clear();
+        let dict = self.tag_dict.bind(py);
+        dict.clear();
+        Ok(())
     }
 }
 
@@ -3370,6 +3489,7 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, Py
     let mut pos = flac_offset + 4;
     let mut has_streaminfo = false;
     let mut vc_data: Option<&[u8]> = None;
+    let mut picture_blocks: Vec<(usize, usize)> = Vec::new();
 
     loop {
         if pos + 4 > data.len() { break; }
@@ -3395,17 +3515,17 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, Py
                 }
             }
             4 => {
-                // Compute actual VC size from internal lengths (handles incorrect block_size headers)
                 let vc_size = flac::compute_vc_data_size(&data[pos..]).unwrap_or(block_size);
                 let end = pos.saturating_add(vc_size).min(data.len());
                 vc_data = Some(&data[pos..end]);
+            }
+            6 => {
+                picture_blocks.push((pos, block_size));
             }
             _ => {}
         }
 
         pos += block_size;
-        // Early break if we have both StreamInfo and VC
-        if has_streaminfo && vc_data.is_some() { break; }
         if is_last { break; }
     }
 
@@ -3415,6 +3535,27 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, Py
     if let Some(vc) = vc_data {
         parse_vc_to_dict_direct(py, vc, dict, &mut keys_out)?;
     }
+
+    // Add pictures to dict as _pictures list
+    if !picture_blocks.is_empty() {
+        let pics = PyList::empty(py);
+        for (pic_pos, pic_size) in &picture_blocks {
+            if let Ok(pic) = flac::FLACPicture::parse(&data[*pic_pos..*pic_pos + *pic_size]) {
+                let d = PyDict::new(py);
+                let _ = d.set_item("type", pic.pic_type);
+                let _ = d.set_item("mime", &pic.mime);
+                let _ = d.set_item("desc", &pic.desc);
+                let _ = d.set_item("width", pic.width);
+                let _ = d.set_item("height", pic.height);
+                let _ = d.set_item("depth", pic.depth);
+                let _ = d.set_item("colors", pic.colors);
+                let _ = d.set_item("data", pyo3::types::PyBytes::new(py, &pic.data));
+                let _ = pics.append(d);
+            }
+        }
+        let _ = dict.set_item(pyo3::intern!(py, "_pictures"), pics);
+    }
+
     set_keys_list(py, dict, keys_out)?;
     Ok(true)
 }
