@@ -39,6 +39,10 @@ jobs:
         run: |
           maturin build --release --out dist
           pip install dist/*.whl
+      - name: Import smoke test
+        run: python -c "import mutagen_rs; print('mutagen_rs imported OK'); print('  _fast_read:', hasattr(mutagen_rs, '_fast_read')); print('  MP3:', hasattr(mutagen_rs, 'MP3')); print('  FLAC:', hasattr(mutagen_rs, 'FLAC')); print('  MP4:', hasattr(mutagen_rs, 'MP4'))"
+      - name: Generate test files
+        run: python tests/generate_test_files.py || echo "Warning: generate_test_files.py not found or failed (non-fatal)"
       - name: Run tests
         run: python -m pytest tests/test_api_compat.py -v
 
