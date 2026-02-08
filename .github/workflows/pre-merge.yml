@@ -39,7 +39,7 @@ jobs:
           sccache: true
           manylinux: auto
       - name: Upload wheel
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheel-linux-${{ matrix.target }}
           path: dist/*.whl
@@ -65,7 +65,7 @@ jobs:
           args: --release --out dist
           sccache: true
       - name: Upload wheel
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheel-macos-${{ matrix.target }}
           path: dist/*.whl
@@ -92,7 +92,7 @@ jobs:
           args: --release --out dist
           sccache: true
       - name: Upload wheel
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: wheel-windows-${{ matrix.target }}
           path: dist/*.whl
@@ -110,7 +110,7 @@ jobs:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
