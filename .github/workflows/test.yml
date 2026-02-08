@@ -2,8 +2,14 @@ name: Test
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: test-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -49,10 +55,10 @@ jobs:
       - name: Check (no warnings)
         run: cargo check --release 2>&1
 
-  # ── Stage 2: Benchmarks ───────────────────────────────────────────
+  # ── Stage 2: Benchmarks (only if ALL tests pass) ──────────────────
   bench-python:
     name: Benchmark (Python)
-    needs: [test-python]
+    needs: [test-python, test-rust]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -81,7 +87,7 @@ jobs:
 
   bench-rust:
     name: Benchmark (Rust)
-    needs: [test-rust]
+    needs: [test-python, test-rust]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
