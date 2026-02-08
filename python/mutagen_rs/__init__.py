@@ -33,6 +33,9 @@ from .mutagen_rs import (
     # Fast sequential batch read (single Rust call, no parallelism)
     _fast_read_seq,
 
+    # Fast parallel batch read (rayon + raw FFI dict creation)
+    _fast_batch_read,
+
     # Clear Rust-level caches
     clear_cache as _rust_clear_cache,
 

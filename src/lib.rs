@@ -1661,8 +1661,9 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
         // Use index-based iteration with min_len to amortize rayon overhead.
         // Each rayon task processes at least 16 files sequentially.
         // Bypass file cache — read directly, avoid RwLock + HashMap + Arc overhead.
+        // min_len(4): small enough for work-stealing, large enough to avoid rayon overhead.
         (0..n).into_par_iter()
-            .with_min_len(16)
+            .with_min_len(4)
             .filter_map(|i| {
                 let path = &filenames[i];
                 let data = read_direct(path).ok()?;
@@ -1678,6 +1679,102 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
         .collect();
 
     Ok(PyBatchResult { files, index })
+}
+
+/// Fast batch read: parallel I/O + parse, then raw FFI dict creation.
+/// Returns a Python dict mapping path → flat dict (same format as _fast_read).
+/// Faster than batch_open for scenarios where all results are accessed.
+#[pyfunction]
+fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>> {
+    use rayon::prelude::*;
+
+    // Phase 1: Parallel read + parse (outside GIL)
+    let parsed: Vec<(String, PreSerializedFile)> = py.detach(|| {
+        let n = filenames.len();
+        if n == 0 { return Vec::new(); }
+        (0..n).into_par_iter()
+            .with_min_len(16)
+            .filter_map(|i| {
+                let path = &filenames[i];
+                let data = read_direct(path).ok()?;
+                let pf = parse_and_serialize(&data, path, None)?;
+                Some((path.clone(), pf))
+            })
+            .collect()
+    });
+
+    // Phase 2: Serial dict creation using raw FFI (under GIL)
+    unsafe {
+        let result_ptr = pyo3::ffi::_PyDict_NewPresized(parsed.len() as pyo3::ffi::Py_ssize_t);
+        if result_ptr.is_null() {
+            return Err(pyo3::exceptions::PyMemoryError::new_err("dict alloc failed"));
+        }
+
+        for (path, pf) in &parsed {
+            let dict_ptr = pyo3::ffi::_PyDict_NewPresized(20);
+            if dict_ptr.is_null() { continue; }
+
+            // Info fields via raw FFI
+            set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), pf.length);
+            set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), pf.sample_rate);
+            set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), pf.channels);
+            if let Some(br) = pf.bitrate {
+                set_dict_u32(dict_ptr, pyo3::intern!(py, "bitrate").as_ptr(), br);
+            }
+
+            // Extra metadata
+            for (key, value) in &pf.extra {
+                let py_val = batch_value_to_py(py, value)?;
+                let key_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                    key.as_ptr() as *const std::ffi::c_char, key.len() as pyo3::ffi::Py_ssize_t);
+                pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
+                pyo3::ffi::Py_DECREF(key_ptr);
+            }
+
+            // Tags via raw FFI
+            let lazy_tags;
+            let tags = if pf.tags.is_empty() {
+                if let Some((data, offset, size)) = &pf.lazy_vc {
+                    lazy_tags = parse_vc_to_batch_tags(&data[*offset..*offset + *size]);
+                    &lazy_tags
+                } else {
+                    &pf.tags
+                }
+            } else {
+                &pf.tags
+            };
+
+            let mut key_ptrs: Vec<*mut pyo3::ffi::PyObject> = Vec::with_capacity(tags.len());
+            for (key, value) in tags {
+                let py_val = batch_value_to_py(py, value)?;
+                let key_ptr = intern_tag_key(key.as_bytes());
+                pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
+                key_ptrs.push(key_ptr);
+            }
+
+            // Set _keys list
+            let keys_list = pyo3::ffi::PyList_New(key_ptrs.len() as pyo3::ffi::Py_ssize_t);
+            for (i, key_ptr) in key_ptrs.iter().enumerate() {
+                pyo3::ffi::Py_INCREF(*key_ptr);
+                pyo3::ffi::PyList_SET_ITEM(keys_list, i as pyo3::ffi::Py_ssize_t, *key_ptr);
+            }
+            let keys_key = pyo3::intern!(py, "_keys");
+            pyo3::ffi::PyDict_SetItem(dict_ptr, keys_key.as_ptr(), keys_list);
+            pyo3::ffi::Py_DECREF(keys_list);
+            for key_ptr in key_ptrs {
+                pyo3::ffi::Py_DECREF(key_ptr);
+            }
+
+            // Insert into result dict: path → flat dict
+            let path_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                path.as_ptr() as *const std::ffi::c_char, path.len() as pyo3::ffi::Py_ssize_t);
+            pyo3::ffi::PyDict_SetItem(result_ptr, path_ptr, dict_ptr);
+            pyo3::ffi::Py_DECREF(path_ptr);
+            pyo3::ffi::Py_DECREF(dict_ptr);
+        }
+
+        Ok(Py::from_owned_ptr(py, result_ptr))
+    }
 }
 
 /// Diagnostic version: measures I/O vs parse vs parallel overhead.
@@ -3184,6 +3281,7 @@ fn mutagen_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_fast_read, m)?)?;
     m.add_function(wrap_pyfunction!(_fast_info, m)?)?;
     m.add_function(wrap_pyfunction!(_fast_read_seq, m)?)?;
+    m.add_function(wrap_pyfunction!(_fast_batch_read, m)?)?;
 
     m.add("MutagenError", m.py().get_type::<common::error::MutagenPyError>())?;
     m.add("ID3Error", m.py().get_type::<common::error::ID3Error>())?;
