@@ -314,10 +314,18 @@ fn parse_mp4_tags_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Resul
 
     // Iterate ilst children
     for item_atom in AtomIter::new(data, ilst.data_offset, ilst.data_offset + ilst.data_size) {
-        let key = atom_name_to_key(&item_atom.name);
+        let item_start = item_atom.data_offset;
+        let item_end = item_atom.data_offset + item_atom.data_size;
+
+        // For freeform atoms (----), build key from mean+name sub-atoms
+        let key = if item_atom.name == *b"----" {
+            build_freeform_key(data, item_start, item_end)
+        } else {
+            atom_name_to_key(&item_atom.name)
+        };
 
         // Iterate data atoms within each item
-        for data_atom in AtomIter::new(data, item_atom.data_offset, item_atom.data_offset + item_atom.data_size) {
+        for data_atom in AtomIter::new(data, item_start, item_end) {
             if data_atom.name == *b"data" {
                 let atom_data = &data[data_atom.data_offset..data_atom.data_offset + data_atom.data_size];
                 if atom_data.len() < 8 {
@@ -339,6 +347,38 @@ fn parse_mp4_tags_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Resul
     }
 
     Ok(tags)
+}
+
+/// Build a freeform atom key in the format "----:mean:name".
+/// Freeform atoms contain 'mean' and 'name' sub-atoms that define the key.
+pub fn build_freeform_key(data: &[u8], start: usize, end: usize) -> String {
+    let mut mean_str = String::new();
+    let mut name_str = String::new();
+
+    for atom in AtomIter::new(data, start, end) {
+        if atom.name == *b"mean" && atom.data_size > 4 {
+            // Skip 4 bytes of version/flags
+            let s = atom.data_offset + 4;
+            let e = atom.data_offset + atom.data_size;
+            if e <= data.len() {
+                mean_str = String::from_utf8_lossy(&data[s..e]).into_owned();
+            }
+        } else if atom.name == *b"name" && atom.data_size > 4 {
+            let s = atom.data_offset + 4;
+            let e = atom.data_offset + atom.data_size;
+            if e <= data.len() {
+                name_str = String::from_utf8_lossy(&data[s..e]).into_owned();
+            }
+        }
+    }
+
+    if !mean_str.is_empty() && !name_str.is_empty() {
+        format!("----:{}:{}", mean_str, name_str)
+    } else if !mean_str.is_empty() {
+        format!("----:{}", mean_str)
+    } else {
+        "----".to_string()
+    }
 }
 
 fn atom_name_to_key(name: &[u8; 4]) -> String {

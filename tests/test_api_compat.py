@@ -194,6 +194,7 @@ FLAC_FILES = [
     "silence-44-s.flac",
     "106-short-picture-block-size.flac",
     "52-overwritten-metadata.flac",
+    "52-too-short-block-size.flac",
     "flac_application.flac",
     "no-tags.flac",
     "variable-block.flac",
@@ -229,6 +230,7 @@ class TestFLACCompat:
 FLAC_TAGGED_FILES = [
     "silence-44-s.flac",
     "52-overwritten-metadata.flac",
+    "52-too-short-block-size.flac",
     "flac_application.flac",
     "variable-block.flac",
 ]
@@ -417,6 +419,9 @@ class TestMP4Compat:
 
 
 MP4_TAGGED_FILES = [
+    "has-tags.m4a",
+    "alac.m4a",
+    "covr-with-name.m4a",
     "nero-chapters.m4b",
     "truncated-64bit.mp4",
 ]

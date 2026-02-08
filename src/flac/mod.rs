@@ -244,6 +244,23 @@ pub struct BlockDesc {
     pub data_size: usize,
 }
 
+/// Compute the actual Vorbis Comment data size from internal length fields.
+/// Returns the total bytes needed to hold the complete VC data.
+pub fn compute_vc_data_size(data: &[u8]) -> Option<usize> {
+    if data.len() < 8 { return None; }
+    let vendor_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let mut pos = 4 + vendor_len;
+    if pos + 4 > data.len() { return None; }
+    let count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+    for _ in 0..count {
+        if pos + 4 > data.len() { return None; }
+        let comment_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        pos += 4 + comment_len;
+    }
+    Some(pos)
+}
+
 /// Complete FLAC file handler.
 #[derive(Debug)]
 pub struct FLACFile {
@@ -326,8 +343,14 @@ impl FLACFile {
                     stream_info = Some(StreamInfo::parse(&data[pos..pos + block_size])?);
                 }
                 BlockType::VorbisComment => {
-                    // Lazy: store raw bytes, don't parse yet
-                    vc_raw = Some(data[pos..pos + block_size].to_vec());
+                    // Compute actual VC data size from internal lengths.
+                    // Some files have incorrect block_size headers
+                    // (e.g., 52-too-short-block-size.flac), so we read based
+                    // on the VC's internal lengths rather than trusting block_size.
+                    let avail = &data[pos..];
+                    let vc_size = compute_vc_data_size(avail).unwrap_or(block_size);
+                    let end = pos + vc_size.min(data.len() - pos);
+                    vc_raw = Some(data[pos..end].to_vec());
                 }
                 BlockType::Picture => {
                     lazy_pictures.push(LazyPicture {

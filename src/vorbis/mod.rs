@@ -79,18 +79,18 @@ impl VorbisComment {
             let key_bytes = &raw[..eq_pos];
             let value_bytes = &raw[eq_pos + 1..];
 
-            // Key: fast ASCII uppercase
-            let key = if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
-                // Already uppercase (common case) - zero-copy if valid UTF-8
+            // Key: fast ASCII lowercase (matches mutagen behavior)
+            let key = if key_bytes.iter().all(|&b| !b.is_ascii_uppercase()) {
+                // Already lowercase (common case) - zero-copy if valid UTF-8
                 match std::str::from_utf8(key_bytes) {
                     Ok(s) => s.to_string(),
                     Err(_) => continue,
                 }
             } else {
-                // Fast ASCII uppercase without full Unicode overhead
+                // Fast ASCII lowercase without full Unicode overhead
                 let mut k = String::with_capacity(key_bytes.len());
                 for &b in key_bytes {
-                    k.push(if b.is_ascii_lowercase() { (b - 32) as char } else { b as char });
+                    k.push(if b.is_ascii_uppercase() { (b + 32) as char } else { b as char });
                 }
                 k
             };
@@ -134,11 +134,11 @@ impl VorbisComment {
         data
     }
 
-    /// Get as a case-insensitive dict (keys are uppercase).
+    /// Get as a case-insensitive dict (keys are lowercase, matching mutagen).
     pub fn as_dict(&self) -> HashMap<String, Vec<String>> {
         let mut dict: HashMap<String, Vec<String>> = HashMap::new();
         for (key, value) in &self.comments {
-            dict.entry(key.to_uppercase())
+            dict.entry(key.to_lowercase())
                 .or_insert_with(Vec::new)
                 .push(value.clone());
         }
@@ -157,17 +157,17 @@ impl VorbisComment {
 
     /// Set all values for a key (replaces existing).
     pub fn set(&mut self, key: &str, values: Vec<String>) {
-        let upper = key.to_uppercase();
-        self.comments.retain(|(k, _)| k != &upper);
+        let lower = key.to_lowercase();
+        self.comments.retain(|(k, _)| k != &lower);
         for v in values {
-            self.comments.push((upper.clone(), v));
+            self.comments.push((lower.clone(), v));
         }
     }
 
     /// Delete all entries for a key.
     pub fn delete(&mut self, key: &str) {
-        let upper = key.to_uppercase();
-        self.comments.retain(|(k, _)| k != &upper);
+        let lower = key.to_lowercase();
+        self.comments.retain(|(k, _)| k != &lower);
     }
 
     /// Get all unique keys. Uses linear scan instead of HashSet for

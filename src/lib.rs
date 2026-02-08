@@ -1144,17 +1144,17 @@ fn parse_vc_to_batch_tags(data: &[u8]) -> Vec<(String, BatchTagValue)> {
         let key_bytes = &raw[..eq_pos];
         let value_bytes = &raw[eq_pos + 1..];
 
-        // Key: uppercase ASCII. Fast path for already-uppercase keys.
-        let key = if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
+        // Key: lowercase ASCII (matches mutagen behavior)
+        let key = if key_bytes.iter().all(|&b| !b.is_ascii_uppercase()) {
             match std::str::from_utf8(key_bytes) {
                 Ok(s) => s.to_string(),
                 Err(_) => continue,
             }
         } else {
-            // Fast ASCII uppercase (no allocation for checking)
+            // Fast ASCII lowercase (no allocation for checking)
             let mut k = String::with_capacity(key_bytes.len());
             for &b in key_bytes {
-                k.push(if b.is_ascii_lowercase() { (b - 32) as char } else { b as char });
+                k.push(if b.is_ascii_uppercase() { (b + 32) as char } else { b as char });
             }
             k
         };
@@ -1216,7 +1216,9 @@ fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
                 }
             }
             4 => {
-                vc_pos = Some((pos, block_size));
+                // Compute actual VC size from internal lengths (handles incorrect block_size headers)
+                let vc_size = flac::compute_vc_data_size(&data[pos..]).unwrap_or(block_size);
+                vc_pos = Some((pos, vc_size));
             }
             _ => {}
         }
@@ -1230,7 +1232,7 @@ fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
 
     // Lazy VC: copy just the VC raw bytes (typically 100-1000 bytes), defer parsing to access time.
     // This avoids ~15 String allocations per file during the rayon parallel phase.
-    let lazy_vc = vc_pos.map(|(off, sz)| data[off..off + sz].to_vec());
+    let lazy_vc = vc_pos.map(|(off, sz)| data[off..off.saturating_add(sz).min(data.len())].to_vec());
 
     Some(PreSerializedFile {
         length,
@@ -1617,10 +1619,10 @@ unsafe fn parse_vc_to_ffi_dict(data: &[u8], tags_dict: *mut pyo3::ffi::PyObject)
         let key_bytes = &raw[..eq_pos];
         let value_bytes = &raw[eq_pos + 1..];
 
-        // Uppercase key into stack buffer (no heap allocation)
+        // Lowercase key into stack buffer (matches mutagen behavior)
         let mut buf = [0u8; 128];
         let key_len = key_bytes.len().min(128);
-        for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_uppercase(); }
+        for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_lowercase(); }
 
         let key_ptr = intern_tag_key(&buf[..key_len]);
         if key_ptr.is_null() { pyo3::ffi::PyErr_Clear(); continue; }
@@ -2439,12 +2441,12 @@ fn eq_ascii_ci(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(&x, &y)| x.to_ascii_uppercase() == y.to_ascii_uppercase())
 }
 
-/// Create Python string from VC key bytes with ASCII uppercasing.
+/// Create Python string from VC key bytes with ASCII lowercasing (matches mutagen).
 /// Uses stack buffer — zero heap allocation.
 #[inline(always)]
 #[allow(dead_code)]
 fn vc_key_to_py<'py>(py: Python<'py>, key_bytes: &[u8]) -> Option<Bound<'py, PyAny>> {
-    if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
+    if key_bytes.iter().all(|&b| !b.is_ascii_uppercase()) {
         std::str::from_utf8(key_bytes).ok()
             .and_then(|s| s.into_pyobject(py).ok())
             .map(|o| o.into_any())
@@ -2452,7 +2454,7 @@ fn vc_key_to_py<'py>(py: Python<'py>, key_bytes: &[u8]) -> Option<Bound<'py, PyA
         let mut buf = [0u8; 128];
         let len = key_bytes.len().min(128);
         for i in 0..len {
-            buf[i] = key_bytes[i].to_ascii_uppercase();
+            buf[i] = key_bytes[i].to_ascii_lowercase();
         }
         std::str::from_utf8(&buf[..len]).ok()
             .and_then(|s| s.into_pyobject(py).ok())
@@ -2517,8 +2519,8 @@ fn emit_vc_groups_to_dict<'py>(
 
     for (key_bytes, values) in groups {
         unsafe {
-            // Create uppercase key using raw FFI
-            let key_ptr = if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
+            // Create lowercase key using raw FFI (matches mutagen behavior)
+            let key_ptr = if key_bytes.iter().all(|&b| !b.is_ascii_uppercase()) {
                 match std::str::from_utf8(key_bytes) {
                     Ok(s) => pyo3::ffi::PyUnicode_FromStringAndSize(
                         s.as_ptr() as *const std::ffi::c_char, s.len() as pyo3::ffi::Py_ssize_t),
@@ -2527,7 +2529,7 @@ fn emit_vc_groups_to_dict<'py>(
             } else {
                 let mut buf = [0u8; 128];
                 let len = key_bytes.len().min(128);
-                for i in 0..len { buf[i] = key_bytes[i].to_ascii_uppercase(); }
+                for i in 0..len { buf[i] = key_bytes[i].to_ascii_lowercase(); }
                 match std::str::from_utf8(&buf[..len]) {
                     Ok(s) => pyo3::ffi::PyUnicode_FromStringAndSize(
                         s.as_ptr() as *const std::ffi::c_char, s.len() as pyo3::ffi::Py_ssize_t),
@@ -2928,10 +2930,10 @@ fn parse_vc_to_dict_direct<'py>(
         let value_bytes = &raw[eq_pos + 1..];
 
         unsafe {
-            // Always uppercase key into stack buffer (branchless, no UTF-8 precheck)
+            // Always lowercase key into stack buffer (matches mutagen behavior)
             let mut buf = [0u8; 128];
             let key_len = key_bytes.len().min(128);
-            for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_uppercase(); }
+            for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_lowercase(); }
 
             let key_ptr = intern_tag_key(&buf[..key_len]);
             if key_ptr.is_null() { pyo3::ffi::PyErr_Clear(); continue; }
@@ -3015,7 +3017,10 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, Py
                 }
             }
             4 => {
-                vc_data = Some(&data[pos..pos+block_size]);
+                // Compute actual VC size from internal lengths (handles incorrect block_size headers)
+                let vc_size = flac::compute_vc_data_size(&data[pos..]).unwrap_or(block_size);
+                let end = pos.saturating_add(vc_size).min(data.len());
+                vc_data = Some(&data[pos..end]);
             }
             _ => {}
         }
@@ -3328,8 +3333,18 @@ fn fast_read_mp4_direct<'py>(py: Python<'py>, data: &[u8], _path: &str, dict: &B
             if meta_off < meta_end {
                 if let Some(ilst) = AtomIter::new(data, meta_off, meta_end).find_name(b"ilst") {
                     for item in AtomIter::new(data, ilst.data_offset, ilst.data_offset + ilst.data_size) {
-                        // Create Python key directly from atom name bytes (no Rust String)
-                        let key_ptr = unsafe { mp4_atom_name_to_py_key(&item.name) };
+                        // For freeform atoms (----), build key from mean+name sub-atoms
+                        let key_ptr = if item.name == *b"----" {
+                            let freeform_key = mp4::build_freeform_key(data, item.data_offset, item.data_offset + item.data_size);
+                            unsafe {
+                                let bytes = freeform_key.as_bytes();
+                                pyo3::ffi::PyUnicode_FromStringAndSize(
+                                    bytes.as_ptr() as *const std::ffi::c_char,
+                                    bytes.len() as pyo3::ffi::Py_ssize_t)
+                            }
+                        } else {
+                            unsafe { mp4_atom_name_to_py_key(&item.name) }
+                        };
                         if key_ptr.is_null() { continue; }
 
                         // Find first "data" atom and convert value directly to Python
@@ -3426,7 +3441,9 @@ unsafe fn mp4_data_to_py_raw(_py: Python<'_>, atom_name: &[u8; 4], type_ind: u32
                     std::ptr::null_mut()
                 }
             } else {
-                std::ptr::null_mut()
+                // Unknown implicit type: store as raw bytes (e.g., freeform atoms)
+                pyo3::ffi::PyBytes_FromStringAndSize(
+                    vd.as_ptr() as *const std::ffi::c_char, vd.len() as pyo3::ffi::Py_ssize_t)
             }
         }
         13 | 14 => {
