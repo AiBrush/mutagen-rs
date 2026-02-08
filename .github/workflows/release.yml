@@ -19,12 +19,11 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
   actions: write
 
 jobs:
   release:
-    name: Bump version, merge, and tag
+    name: Bump version and tag
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -59,13 +58,6 @@ jobs:
       - name: Install Rust (for Cargo.lock update)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Create release branch
-        id: branch
-        run: |
-          BRANCH="release/v${{ steps.next.outputs.version }}"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          git checkout -b "$BRANCH"
-
       - name: Update Cargo.toml version
         run: |
           sed -i "0,/^version = \".*\"/s//version = \"${{ steps.next.outputs.version }}\"/" Cargo.toml
@@ -75,51 +67,18 @@ jobs:
       - name: Update Cargo.lock
         run: cargo generate-lockfile
 
-      - name: Commit version bump
+      - name: Commit and push version bump
+        if: ${{ !inputs.dry_run }}
         run: |
           git add Cargo.toml Cargo.lock
           git commit -m "release: v${{ steps.next.outputs.version }}"
+          git push origin main
 
-      - name: Push branch and create PR
-        if: ${{ !inputs.dry_run }}
-        id: pr
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BRANCH="${{ steps.branch.outputs.branch }}"
-          git push origin "$BRANCH"
-
-          PR_URL=$(gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "release: v${{ steps.next.outputs.version }}" \
-            --body "Automated version bump: ${{ steps.current.outputs.version }} → ${{ steps.next.outputs.version }} (${{ inputs.bump }})")
-
-          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "Created PR #$PR_NUMBER"
-
-      - name: Merge PR (squash)
+      - name: Tag and trigger CI
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr merge ${{ steps.pr.outputs.pr_number }} \
-            --squash \
-            --delete-branch \
-            --subject "release: v${{ steps.next.outputs.version }}"
-
-      - name: Tag merged commit and trigger CI
-        if: ${{ !inputs.dry_run }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Pull the squash-merged commit
-          git fetch origin main
-          git checkout main
-          git pull origin main
-
-          # Tag it
           TAG="v${{ steps.next.outputs.version }}"
           git tag "$TAG"
           git push origin "$TAG"
