@@ -2,6 +2,7 @@
 import json
 import time
 import os
+import logging
 import mutagen
 from mutagen.mp3 import MP3
 from mutagen.flac import FLAC
@@ -36,8 +37,9 @@ def benchmark_format(name, cls, paths, iterations=100):
     for p in paths:
         try:
             cls(p)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Ignore files that fail to load during warm-up, but log for diagnostics.
+            logging.getLogger(__name__).debug("Warm-up failed for %s: %r", p, exc)
 
     times = []
     for _ in range(iterations):
@@ -56,8 +58,9 @@ def benchmark_format(name, cls, paths, iterations=100):
                     _ = list(f.tags.keys())
                     for k in f.tags.keys():
                         _ = f.tags[k]
-            except Exception:
-                pass
+            except Exception as exc:
+                # Skip files that fail during benchmarking, but log the failure.
+                logging.getLogger(__name__).debug("Benchmark failed for %s: %r", p, exc)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
@@ -88,8 +91,9 @@ def benchmark_auto_detect(paths, iterations=100):
         for p in all_paths:
             try:
                 mutagen.File(p)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Ignore files that fail auto-detection, but log for debugging.
+                logging.getLogger(__name__).debug("Auto-detect failed for %s: %r", p, exc)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
 
