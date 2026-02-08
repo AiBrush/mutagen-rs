@@ -29,7 +29,7 @@ default = []
 python = ["dep:pyo3"]
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
+pyo3 = { version = "0.28", features = ["extension-module"], optional = true }
 memmap2 = "0.9"
 thiserror = "2.0"
 encoding_rs = "0.8"
