@@ -46,7 +46,7 @@ mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-lofty = "0.22"
+lofty = "0.23"
 
 [[bench]]
 name = "parse_comparison"
