@@ -107,6 +107,28 @@ class _CachedFile(dict):
         if self._native is not None:
             self._native.save(*args, **kwargs)
             _cache.pop(self.filename, None)
+            _rust_clear_cache()
+            return
+        # Fast path had no native object — construct one on demand for saving
+        ext = self.filename.rsplit('.', 1)[-1].lower()
+        if ext == 'mp3':
+            native = _RustMP3(self.filename)
+        elif ext == 'flac':
+            native = _RustFLAC(self.filename)
+        elif ext == 'ogg':
+            native = _RustOggVorbis(self.filename)
+        elif ext in ('m4a', 'mp4', 'aac'):
+            raise NotImplementedError("MP4 write not yet implemented")
+        else:
+            raise NotImplementedError(f"Save not supported for .{ext}")
+        # Apply all tags (including user-modified keys) to native object
+        for k in dict.keys(self):
+            v = dict.__getitem__(self, k)
+            if v is not None:
+                native[k] = v
+        native.save(*args, **kwargs)
+        _cache.pop(self.filename, None)
+        _rust_clear_cache()  # Invalidate Rust file/result caches so re-reads see new data
 
     def pprint(self):
         if self._native is not None:
@@ -196,7 +218,10 @@ def File(filename, easy=False):
     w = _cache.get(filename)
     if w is not None:
         return w
-    d = _fast_read(filename)
+    try:
+        d = _fast_read(filename)
+    except (MutagenError, ValueError, OSError):
+        return None
     w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w

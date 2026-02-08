@@ -387,6 +387,30 @@ impl PyMP3 {
         }
     }
 
+    fn __setitem__(&mut self, py: Python, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let text = value.extract::<Vec<String>>().or_else(|_| {
+            value.extract::<String>().map(|s| vec![s])
+        })?;
+        // Update the cached Python dict + key list
+        let _ = self.tag_dict.bind(py).set_item(key, PyList::new(py, &text)?);
+        if !self.tag_keys.contains(&key.to_string()) {
+            self.tag_keys.push(key.to_string());
+        }
+        // Update the underlying ID3 tag storage
+        let frame = id3::frames::Frame::Text(id3::frames::TextFrame {
+            id: key.to_string(),
+            encoding: id3::specs::Encoding::Utf8,
+            text,
+        });
+        let hash_key = frame.hash_key();
+        if let Some((_, frames)) = self.id3.tags.frames.iter_mut().find(|(k, _)| k == &hash_key) {
+            *frames = vec![id3::tags::LazyFrame::Decoded(frame)];
+        } else {
+            self.id3.tags.frames.push((hash_key, vec![id3::tags::LazyFrame::Decoded(frame)]));
+        }
+        Ok(())
+    }
+
     fn __contains__(&self, py: Python, key: &str) -> bool {
         self.tag_dict.bind(py).get_item(key).ok().flatten().is_some()
     }
@@ -594,6 +618,23 @@ impl PyFLAC {
         }
     }
 
+    fn __setitem__(&mut self, py: Python, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let values = value.extract::<Vec<String>>().or_else(|_| {
+            value.extract::<String>().map(|s| vec![s])
+        })?;
+        // Update the cached Python dict + key list
+        let _ = self.tag_dict.bind(py).set_item(key, PyList::new(py, &values)?);
+        if !self.tag_keys.contains(&key.to_string()) {
+            self.tag_keys.push(key.to_string());
+        }
+        // Update the underlying Vorbis comment storage
+        self.vc_data.set(key, values.clone());
+        if let Some(ref mut tags) = self.flac_file.tags {
+            tags.set(key, values);
+        }
+        Ok(())
+    }
+
     fn __contains__(&self, py: Python, key: &str) -> bool {
         self.tag_dict.bind(py).get_item(key).ok().flatten().is_some()
     }
@@ -718,6 +759,18 @@ impl PyOggVorbis {
         }
     }
 
+    fn __setitem__(&mut self, py: Python, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let values = value.extract::<Vec<String>>().or_else(|_| {
+            value.extract::<String>().map(|s| vec![s])
+        })?;
+        self.vc.vc.set(key, values.clone());
+        let _ = self.tag_dict.bind(py).set_item(key, PyList::new(py, &values)?);
+        if !self.tag_keys.contains(&key.to_string()) {
+            self.tag_keys.push(key.to_string());
+        }
+        Ok(())
+    }
+
     fn __contains__(&self, py: Python, key: &str) -> bool {
         self.tag_dict.bind(py).get_item(key).ok().flatten().is_some()
     }
@@ -727,7 +780,14 @@ impl PyOggVorbis {
     }
 
     fn save(&self) -> PyResult<()> {
-        Err(PyValueError::new_err("OGG write support is limited"))
+        let data = read_cached(&self.filename)
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        let mut ogg_file = ogg::OggVorbisFile::parse(&data, &self.filename)
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        ogg_file.tags = self.vc.vc.clone();
+        ogg_file.save()
+            .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
+        Ok(())
     }
 }
 
@@ -1196,6 +1256,8 @@ fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
     let mut sample_rate = 0u32;
     let mut channels = 0u8;
     let mut length = 0.0f64;
+    let mut bits_per_sample = 0u8;
+    let mut total_samples = 0u64;
     let mut vc_pos: Option<(usize, usize)> = None;
 
     loop {
@@ -1213,6 +1275,8 @@ fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
                     sample_rate = si.sample_rate;
                     channels = si.channels;
                     length = si.length;
+                    bits_per_sample = si.bits_per_sample;
+                    total_samples = si.total_samples;
                 }
             }
             4 => {
@@ -1240,7 +1304,10 @@ fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
         channels: channels as u32,
         bitrate: None,
         tags: Vec::new(),
-        extra: Vec::new(),
+        extra: vec![
+            ("bits_per_sample", BatchTagValue::Int(bits_per_sample as i64)),
+            ("total_samples", BatchTagValue::Int(total_samples as i64)),
+        ],
         lazy_vc,
     })
 }
@@ -2703,8 +2770,8 @@ unsafe fn try_text_frame_to_py(data: &[u8]) -> Option<*mut pyo3::ffi::PyObject> 
     }
 }
 
-/// Resolve TCON genre references like "(3)", "35", or "(3)Dance" to names.
-fn resolve_tcon_genre(text: &str) -> String {
+/// Resolve a single TCON genre reference like "(3)", "35", or "(3)Dance" to a name.
+fn resolve_tcon_genre_single(text: &str) -> String {
     let genres = crate::id3::specs::GENRES;
     // Handle "(N)" prefix format
     if text.starts_with('(') {
@@ -2727,6 +2794,20 @@ fn resolve_tcon_genre(text: &str) -> String {
         }
     }
     text.to_string()
+}
+
+/// Resolve TCON genre references, handling null-separated multi-value text.
+/// Returns the first resolved genre value.
+fn resolve_tcon_genre(text: &str) -> String {
+    // Handle null-separated multi-value TCON (ID3v2.4 uses \0 as separator)
+    if text.contains('\0') {
+        for part in text.split('\0') {
+            if !part.is_empty() {
+                return resolve_tcon_genre_single(part);
+            }
+        }
+    }
+    resolve_tcon_genre_single(text)
 }
 
 /// Walk v2.2 ID3 frames and emit directly to PyDict.
@@ -2786,8 +2867,20 @@ fn fast_walk_v22_frames(
                         } else { py_ptr }
                     } else { py_ptr };
                     if final_ptr.is_null() { continue; }
+                    // TYER normalization: store as TDRC only (mutagen normalizes TYER to TDRC)
                     let is_tyer = v24_bytes == b"TYER";
-                    let key_ptr = intern_tag_key(v24_bytes);
+                    let key_ptr = if is_tyer {
+                        let tdrc_key = intern_tag_key(b"TDRC");
+                        // If TDRC already exists, skip TYER entirely
+                        if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) != 0 {
+                            pyo3::ffi::Py_DECREF(tdrc_key);
+                            pyo3::ffi::Py_DECREF(final_ptr);
+                            continue;
+                        }
+                        tdrc_key
+                    } else {
+                        intern_tag_key(v24_bytes)
+                    };
                     let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
                     if existing.is_null() {
                         pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, final_ptr);
@@ -2805,15 +2898,6 @@ fn fast_walk_v22_frames(
                             pyo3::ffi::Py_DECREF(list);
                         }
                         pyo3::ffi::Py_DECREF(key_ptr);
-                    }
-                    if is_tyer {
-                        let tdrc_key = intern_tag_key(b"TDRC");
-                        if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
-                            pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, final_ptr);
-                            key_ptrs.push(tdrc_key);
-                        } else {
-                            pyo3::ffi::Py_DECREF(tdrc_key);
-                        }
                     }
                     pyo3::ffi::Py_DECREF(final_ptr);
                     continue;
@@ -2886,9 +2970,20 @@ fn fast_walk_v2x_frames(
                             } else { py_ptr }
                         } else { py_ptr };
                         if final_ptr.is_null() { continue; }
-                        // TYER → also store as TDRC (mutagen normalizes TYER to TDRC)
+                        // TYER normalization: store as TDRC only (mutagen normalizes TYER to TDRC)
                         let is_tyer = id_bytes == b"TYER";
-                        let key_ptr = intern_tag_key(id_bytes);
+                        let key_ptr = if is_tyer {
+                            let tdrc_key = intern_tag_key(b"TDRC");
+                            // If TDRC already exists, skip TYER entirely
+                            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) != 0 {
+                                pyo3::ffi::Py_DECREF(tdrc_key);
+                                pyo3::ffi::Py_DECREF(final_ptr);
+                                continue;
+                            }
+                            tdrc_key
+                        } else {
+                            intern_tag_key(id_bytes)
+                        };
                         let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
                         if existing.is_null() {
                             pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, final_ptr);
@@ -2907,16 +3002,6 @@ fn fast_walk_v2x_frames(
                                 pyo3::ffi::Py_DECREF(list);
                             }
                             pyo3::ffi::Py_DECREF(key_ptr);
-                        }
-                        // TYER normalization: store as TDRC if TDRC not already set
-                        if is_tyer {
-                            let tdrc_key = intern_tag_key(b"TDRC");
-                            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
-                                pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, final_ptr);
-                                key_ptrs.push(tdrc_key);
-                            } else {
-                                pyo3::ffi::Py_DECREF(tdrc_key);
-                            }
                         }
                         pyo3::ffi::Py_DECREF(final_ptr);
                         continue;
@@ -3000,7 +3085,17 @@ fn emit_frame_to_dict(
     let key = actual_frame.hash_key();
     let py_val = frame_to_py(py, actual_frame);
     unsafe {
-        let key_ptr = intern_tag_key(key.as_str().as_bytes());
+        // TYER normalization: store as TDRC only if TDRC not already present
+        let key_ptr = if id_str == "TYER" {
+            let tdrc_key = intern_tag_key(b"TDRC");
+            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) != 0 {
+                pyo3::ffi::Py_DECREF(tdrc_key);
+                return; // TDRC already exists, skip TYER
+            }
+            tdrc_key
+        } else {
+            intern_tag_key(key.as_str().as_bytes())
+        };
         let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
         if existing.is_null() {
             pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
@@ -3036,16 +3131,6 @@ fn emit_frame_to_dict(
                 }
             }
             pyo3::ffi::Py_DECREF(key_ptr);
-        }
-        // TYER → TDRC normalization
-        if id_str == "TYER" {
-            let tdrc_key = intern_tag_key(b"TDRC");
-            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
-                pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, py_val.as_ptr());
-                key_ptrs.push(tdrc_key);
-            } else {
-                pyo3::ffi::Py_DECREF(tdrc_key);
-            }
         }
     }
 }
@@ -3169,6 +3254,8 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, Py
                         set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), si.length);
                         set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), si.sample_rate);
                         set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), si.channels as u32);
+                        set_dict_u32(dict_ptr, pyo3::intern!(py, "bits_per_sample").as_ptr(), si.bits_per_sample as u32);
+                        set_dict_i64(dict_ptr, pyo3::intern!(py, "total_samples").as_ptr(), si.total_samples as i64);
                     }
                     has_streaminfo = true;
                 }
@@ -3643,6 +3730,8 @@ fn fast_info_flac<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) 
                     set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), si.length);
                     set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), si.sample_rate);
                     set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), si.channels as u32);
+                    set_dict_u32(dict_ptr, pyo3::intern!(py, "bits_per_sample").as_ptr(), si.bits_per_sample as u32);
+                    set_dict_i64(dict_ptr, pyo3::intern!(py, "total_samples").as_ptr(), si.total_samples as i64);
                 }
                 return Ok(true);
             }

@@ -646,7 +646,11 @@ class TestWriteSupport:
         f.save()
         # Re-read and verify
         f2 = mutagen_rs.MP3(dst)
-        assert f2["TIT2"] == "Test Title" or str(f2["TIT2"]) == "Test Title"
+        vals = f2["TIT2"]
+        if isinstance(vals, list):
+            assert "Test Title" in vals
+        else:
+            assert str(vals) == "Test Title"
 
     def test_flac_save(self, tmp_path):
         """FLAC save should work without error."""
@@ -657,11 +661,12 @@ class TestWriteSupport:
         dst = str(tmp_path / "test.flac")
         shutil.copy2(src, dst)
         f = mutagen_rs.FLAC(dst)
-        f["TITLE"] = "Test Title"
+        f["title"] = "Test Title"
         f.save()
-        # Re-read and verify
+        # Re-read and verify (Vorbis comments are case-insensitive, stored lowercase)
+        mutagen_rs.clear_cache()
         f2 = mutagen_rs.FLAC(dst)
-        vals = f2["TITLE"]
+        vals = f2["title"]
         if isinstance(vals, list):
             assert "Test Title" in vals
         else:

@@ -85,7 +85,7 @@ impl StreamInfo {
         let channels = (((data[12] >> 1) & 0x07) + 1) as u8;
         let bps_hi = ((data[12] & 0x01) as u8) << 4;
         let bps_lo = (data[13] >> 4) & 0x0F;
-        let bits_per_sample = bps_hi | bps_lo + 1;
+        let bits_per_sample = (bps_hi | bps_lo) + 1;
 
         let total_samples_hi = ((data[13] & 0x0F) as u64) << 32;
         let total_samples_lo = u32::from_be_bytes([data[14], data[15], data[16], data[17]]) as u64;
