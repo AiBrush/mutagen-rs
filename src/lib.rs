@@ -2680,31 +2680,53 @@ unsafe fn try_text_frame_to_py(data: &[u8]) -> Option<*mut pyo3::ffi::PyObject> 
     if len == 0 { return None; }
     let text = &text_data[..len];
     match enc {
-        3 => { // UTF-8: validate and create directly
-            if memchr::memchr(0, text).is_some() { return None; } // multi-value
-            if std::str::from_utf8(text).is_err() { return None; }
-            let ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                text.as_ptr() as *const std::ffi::c_char, text.len() as pyo3::ffi::Py_ssize_t);
+        3 | 0 => {
+            // UTF-8 (3) or Latin-1 (0)
+            let has_high = enc == 0 && text.iter().any(|&b| b >= 128);
+            let make_str = |s: &[u8]| -> *mut pyo3::ffi::PyObject {
+                if has_high {
+                    pyo3::ffi::PyUnicode_DecodeLatin1(
+                        s.as_ptr() as *const std::ffi::c_char,
+                        s.len() as pyo3::ffi::Py_ssize_t,
+                        std::ptr::null())
+                } else {
+                    pyo3::ffi::PyUnicode_FromStringAndSize(
+                        s.as_ptr() as *const std::ffi::c_char,
+                        s.len() as pyo3::ffi::Py_ssize_t)
+                }
+            };
+            if enc == 3 && std::str::from_utf8(text).is_err() { return None; }
+            let ptr = make_str(text);
             if ptr.is_null() { None } else { Some(ptr) }
-        }
-        0 => { // Latin-1
-            if memchr::memchr(0, text).is_some() { return None; } // multi-value
-            if text.iter().all(|&b| b < 128) {
-                // Pure ASCII: direct
-                let ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
-                    text.as_ptr() as *const std::ffi::c_char, text.len() as pyo3::ffi::Py_ssize_t);
-                if ptr.is_null() { None } else { Some(ptr) }
-            } else {
-                // Latin-1 with high bytes: use Python's decoder
-                let ptr = pyo3::ffi::PyUnicode_DecodeLatin1(
-                    text.as_ptr() as *const std::ffi::c_char,
-                    text.len() as pyo3::ffi::Py_ssize_t,
-                    std::ptr::null());
-                if ptr.is_null() { None } else { Some(ptr) }
-            }
         }
         _ => None // UTF-16: fall back to full decode
     }
+}
+
+/// Resolve TCON genre references like "(3)", "35", or "(3)Dance" to names.
+fn resolve_tcon_genre(text: &str) -> String {
+    let genres = crate::id3::specs::GENRES;
+    // Handle "(N)" prefix format
+    if text.starts_with('(') {
+        if let Some(end) = text.find(')') {
+            if let Ok(n) = text[1..end].parse::<usize>() {
+                let suffix = &text[end + 1..];
+                if !suffix.is_empty() {
+                    return suffix.to_string(); // "(3)Dance" → "Dance"
+                }
+                if n < genres.len() {
+                    return genres[n].to_string(); // "(3)" → "Dance"
+                }
+            }
+        }
+    }
+    // Handle bare number "35"
+    if let Ok(n) = text.parse::<usize>() {
+        if n < genres.len() {
+            return genres[n].to_string();
+        }
+    }
+    text.to_string()
 }
 
 /// Walk v2.2 ID3 frames and emit directly to PyDict.
@@ -2744,18 +2766,56 @@ fn fast_walk_v22_frames(
             None => continue,
         };
 
-        // Fast text path (skip if key exists)
+        // Fast text path with merge, TCON resolution, TYER→TDRC
         if v24_id.as_bytes()[0] == b'T' && v24_id != "TXXX" && v24_id != "TIPL" && v24_id != "TMCL" && v24_id != "IPLS" {
             unsafe {
                 if let Some(py_ptr) = try_text_frame_to_py(frame_data) {
-                    let key_ptr = intern_tag_key(v24_id.as_bytes());
-                    if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
-                        pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_ptr);
+                    let v24_bytes = v24_id.as_bytes();
+                    // TCON: resolve genre references
+                    let final_ptr = if v24_bytes == b"TCON" {
+                        let py_str = pyo3::ffi::PyUnicode_AsUTF8(py_ptr);
+                        if !py_str.is_null() {
+                            let s = std::ffi::CStr::from_ptr(py_str).to_string_lossy();
+                            let resolved = resolve_tcon_genre(&s);
+                            let r = resolved.as_bytes();
+                            let new_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                                r.as_ptr() as *const std::ffi::c_char,
+                                r.len() as pyo3::ffi::Py_ssize_t);
+                            pyo3::ffi::Py_DECREF(py_ptr);
+                            new_ptr
+                        } else { py_ptr }
+                    } else { py_ptr };
+                    if final_ptr.is_null() { continue; }
+                    let is_tyer = v24_bytes == b"TYER";
+                    let key_ptr = intern_tag_key(v24_bytes);
+                    let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
+                    if existing.is_null() {
+                        pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, final_ptr);
                         key_ptrs.push(key_ptr);
                     } else {
+                        if pyo3::ffi::PyList_Check(existing) != 0 {
+                            pyo3::ffi::PyList_Append(existing, final_ptr);
+                        } else {
+                            let list = pyo3::ffi::PyList_New(2);
+                            pyo3::ffi::Py_INCREF(existing);
+                            pyo3::ffi::PyList_SET_ITEM(list, 0, existing);
+                            pyo3::ffi::Py_INCREF(final_ptr);
+                            pyo3::ffi::PyList_SET_ITEM(list, 1, final_ptr);
+                            pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, list);
+                            pyo3::ffi::Py_DECREF(list);
+                        }
                         pyo3::ffi::Py_DECREF(key_ptr);
                     }
-                    pyo3::ffi::Py_DECREF(py_ptr);
+                    if is_tyer {
+                        let tdrc_key = intern_tag_key(b"TDRC");
+                        if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
+                            pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, final_ptr);
+                            key_ptrs.push(tdrc_key);
+                        } else {
+                            pyo3::ffi::Py_DECREF(tdrc_key);
+                        }
+                    }
+                    pyo3::ffi::Py_DECREF(final_ptr);
                     continue;
                 }
             }
@@ -2806,18 +2866,59 @@ fn fast_walk_v2x_frames(
             let frame_data = &tag_bytes[*offset..*offset+size];
             *offset += size;
 
-            // Simple text frames: zero-alloc direct to Python (skip if key already set)
+            // Simple text frames: zero-alloc direct to Python
+            // For duplicates: merge values like mutagen (extends text list)
             if id_bytes[0] == b'T' && id_str != "TXXX" && id_str != "TIPL" && id_str != "TMCL" && id_str != "IPLS" {
                 unsafe {
                     if let Some(py_ptr) = try_text_frame_to_py(frame_data) {
+                        // TCON: resolve genre references
+                        let final_ptr = if id_bytes == b"TCON" {
+                            let py_str = pyo3::ffi::PyUnicode_AsUTF8(py_ptr);
+                            if !py_str.is_null() {
+                                let s = std::ffi::CStr::from_ptr(py_str).to_string_lossy();
+                                let resolved = resolve_tcon_genre(&s);
+                                let r = resolved.as_bytes();
+                                let new_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+                                    r.as_ptr() as *const std::ffi::c_char,
+                                    r.len() as pyo3::ffi::Py_ssize_t);
+                                pyo3::ffi::Py_DECREF(py_ptr);
+                                new_ptr
+                            } else { py_ptr }
+                        } else { py_ptr };
+                        if final_ptr.is_null() { continue; }
+                        // TYER → also store as TDRC (mutagen normalizes TYER to TDRC)
+                        let is_tyer = id_bytes == b"TYER";
                         let key_ptr = intern_tag_key(id_bytes);
-                        if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
-                            pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_ptr);
+                        let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
+                        if existing.is_null() {
+                            pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, final_ptr);
                             key_ptrs.push(key_ptr);
                         } else {
+                            // Merge: append to existing value
+                            if pyo3::ffi::PyList_Check(existing) != 0 {
+                                pyo3::ffi::PyList_Append(existing, final_ptr);
+                            } else {
+                                let list = pyo3::ffi::PyList_New(2);
+                                pyo3::ffi::Py_INCREF(existing);
+                                pyo3::ffi::PyList_SET_ITEM(list, 0, existing);
+                                pyo3::ffi::Py_INCREF(final_ptr);
+                                pyo3::ffi::PyList_SET_ITEM(list, 1, final_ptr);
+                                pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, list);
+                                pyo3::ffi::Py_DECREF(list);
+                            }
                             pyo3::ffi::Py_DECREF(key_ptr);
                         }
-                        pyo3::ffi::Py_DECREF(py_ptr);
+                        // TYER normalization: store as TDRC if TDRC not already set
+                        if is_tyer {
+                            let tdrc_key = intern_tag_key(b"TDRC");
+                            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
+                                pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, final_ptr);
+                                key_ptrs.push(tdrc_key);
+                            } else {
+                                pyo3::ffi::Py_DECREF(tdrc_key);
+                            }
+                        }
+                        pyo3::ffi::Py_DECREF(final_ptr);
                         continue;
                     }
                 }
@@ -2846,19 +2947,9 @@ fn fast_walk_v2x_frames(
                 }
             }
 
-            // Full decode fallback (skip if key already set)
+            // Full decode fallback
             if let Ok(frame) = id3::frames::parse_frame(id_str, frame_data) {
-                let key = frame.hash_key();
-                let py_val = frame_to_py(py, &frame);
-                unsafe {
-                    let key_ptr = intern_tag_key(key.as_str().as_bytes());
-                    if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
-                        pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
-                        key_ptrs.push(key_ptr);
-                    } else {
-                        pyo3::ffi::Py_DECREF(key_ptr);
-                    }
-                }
+                emit_frame_to_dict(py, &frame, id_str, dict_ptr, key_ptrs);
             }
         } else {
             // Frame with flags: need data mutations
@@ -2877,17 +2968,83 @@ fn fast_walk_v2x_frames(
             if compressed { continue; }
 
             if let Ok(frame) = id3::frames::parse_frame(id_str, &frame_data) {
-                let key = frame.hash_key();
-                let py_val = frame_to_py(py, &frame);
-                unsafe {
-                    let key_ptr = intern_tag_key(key.as_str().as_bytes());
-                    if pyo3::ffi::PyDict_Contains(dict_ptr, key_ptr) == 0 {
-                        pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
-                        key_ptrs.push(key_ptr);
+                emit_frame_to_dict(py, &frame, id_str, dict_ptr, key_ptrs);
+            }
+        }
+    }
+}
+
+/// Emit a parsed ID3 frame to dict with TCON resolution, TYER→TDRC, and merge support.
+fn emit_frame_to_dict(
+    py: Python<'_>, frame: &id3::frames::Frame, id_str: &str,
+    dict_ptr: *mut pyo3::ffi::PyObject, key_ptrs: &mut Vec<*mut pyo3::ffi::PyObject>,
+) {
+    // TCON genre resolution
+    let frame_ref;
+    let resolved_frame;
+    let actual_frame = if id_str == "TCON" {
+        if let id3::frames::Frame::Text(tf) = frame {
+            let resolved_text: Vec<String> = tf.text.iter()
+                .map(|t| resolve_tcon_genre(t))
+                .collect();
+            resolved_frame = id3::frames::Frame::Text(id3::frames::TextFrame {
+                id: tf.id.clone(),
+                encoding: tf.encoding,
+                text: resolved_text,
+            });
+            frame_ref = &resolved_frame;
+            frame_ref
+        } else { frame }
+    } else { frame };
+
+    let key = actual_frame.hash_key();
+    let py_val = frame_to_py(py, actual_frame);
+    unsafe {
+        let key_ptr = intern_tag_key(key.as_str().as_bytes());
+        let existing = pyo3::ffi::PyDict_GetItem(dict_ptr, key_ptr);
+        if existing.is_null() {
+            pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
+            key_ptrs.push(key_ptr);
+        } else {
+            // Text frame merge: append values
+            if let id3::frames::Frame::Text(_) = actual_frame {
+                if pyo3::ffi::PyList_Check(existing) != 0 {
+                    if pyo3::ffi::PyList_Check(py_val.as_ptr()) != 0 {
+                        let n = pyo3::ffi::PyList_Size(py_val.as_ptr());
+                        for i in 0..n {
+                            let item = pyo3::ffi::PyList_GetItem(py_val.as_ptr(), i);
+                            pyo3::ffi::PyList_Append(existing, item);
+                        }
                     } else {
-                        pyo3::ffi::Py_DECREF(key_ptr);
+                        pyo3::ffi::PyList_Append(existing, py_val.as_ptr());
                     }
+                } else {
+                    // Convert existing string + new to list
+                    let list = pyo3::ffi::PyList_New(0);
+                    pyo3::ffi::PyList_Append(list, existing);
+                    if pyo3::ffi::PyList_Check(py_val.as_ptr()) != 0 {
+                        let n = pyo3::ffi::PyList_Size(py_val.as_ptr());
+                        for i in 0..n {
+                            let item = pyo3::ffi::PyList_GetItem(py_val.as_ptr(), i);
+                            pyo3::ffi::PyList_Append(list, item);
+                        }
+                    } else {
+                        pyo3::ffi::PyList_Append(list, py_val.as_ptr());
+                    }
+                    pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, list);
+                    pyo3::ffi::Py_DECREF(list);
                 }
+            }
+            pyo3::ffi::Py_DECREF(key_ptr);
+        }
+        // TYER → TDRC normalization
+        if id_str == "TYER" {
+            let tdrc_key = intern_tag_key(b"TDRC");
+            if pyo3::ffi::PyDict_Contains(dict_ptr, tdrc_key) == 0 {
+                pyo3::ffi::PyDict_SetItem(dict_ptr, tdrc_key, py_val.as_ptr());
+                key_ptrs.push(tdrc_key);
+            } else {
+                pyo3::ffi::Py_DECREF(tdrc_key);
             }
         }
     }
