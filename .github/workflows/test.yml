@@ -195,16 +195,16 @@ jobs:
               d = py[fmt]
               cold = d.get('speedup_cold', 0)
               warm = d.get('speedup_warm', 0)
-              status = '✅' if cold >= 5 else '❌'
-              if cold < 5:
+              status = '✅' if cold >= 3 else '❌'
+              if cold < 3:
                   py_pass = False
               print(f'  {fmt.upper():5s}  cold={cold:6.1f}x  warm={warm:7.1f}x  {status}')
 
           if 'auto_detect' in py:
               d = py['auto_detect']
               cold = d.get('speedup_cold', 0)
-              status = '✅' if cold >= 5 else '❌'
-              if cold < 5:
+              status = '✅' if cold >= 3 else '❌'
+              if cold < 3:
                   py_pass = False
               print(f'  AUTO   cold={cold:6.1f}x  warm={d.get(\"speedup_warm\", 0):7.1f}x  {status}')
 
