@@ -36,7 +36,7 @@ def benchmark_format(name, cls, paths, iterations=100):
     for p in paths:
         try:
             cls(p)
-        except Exception:
+        except mutagen.MutagenError:
             pass
 
     times = []
@@ -56,7 +56,7 @@ def benchmark_format(name, cls, paths, iterations=100):
                     _ = list(f.tags.keys())
                     for k in f.tags.keys():
                         _ = f.tags[k]
-            except Exception:
+            except mutagen.MutagenError:
                 pass
         elapsed = time.perf_counter() - start
         times.append(elapsed)
@@ -88,7 +88,7 @@ def benchmark_auto_detect(paths, iterations=100):
         for p in all_paths:
             try:
                 mutagen.File(p)
-            except Exception:
+            except mutagen.MutagenError:
                 pass
         elapsed = time.perf_counter() - start
         times.append(elapsed)
