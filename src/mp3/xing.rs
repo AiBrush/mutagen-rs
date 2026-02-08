@@ -53,8 +53,8 @@ impl XingHeader {
             (_, _) => 21,
         };
 
-        // Add 4 bytes for the frame header itself
-        let xing_offset = offset + 4;
+        // offset values already include the 4-byte frame header
+        let xing_offset = offset;
 
         if data.len() < xing_offset + 4 {
             return None;

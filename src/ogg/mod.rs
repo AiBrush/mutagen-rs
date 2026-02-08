@@ -215,6 +215,47 @@ fn ogg_first_packet(data: &[u8], offset: usize) -> Option<&[u8]> {
     Some(&data[pkt_start..pkt_start + packet_size])
 }
 
+/// Assemble the first packet from an OGG page, handling multi-page packets.
+/// Returns the complete packet data across all continuation pages.
+pub fn ogg_assemble_first_packet(data: &[u8], offset: usize) -> Option<Vec<u8>> {
+    let mut result = Vec::new();
+    let mut page_offset = offset;
+
+    loop {
+        if page_offset + 27 > data.len() { break; }
+        let d = &data[page_offset..];
+        if &d[0..4] != b"OggS" { break; }
+
+        let num_seg = d[26] as usize;
+        let header_size = 27 + num_seg;
+        if page_offset + header_size > data.len() { break; }
+
+        let mut data_pos = page_offset + header_size;
+        let mut packet_complete = false;
+
+        for &seg in &d[27..27 + num_seg] {
+            let seg_size = seg as usize;
+            if data_pos + seg_size > data.len() {
+                return if result.is_empty() { None } else { Some(result) };
+            }
+            result.extend_from_slice(&data[data_pos..data_pos + seg_size]);
+            data_pos += seg_size;
+            if seg < 255 {
+                packet_complete = true;
+                break;
+            }
+        }
+
+        if packet_complete { break; }
+
+        // Advance to next page (packet continues)
+        let total_data_size: usize = d[27..27 + num_seg].iter().map(|&s| s as usize).sum();
+        page_offset += header_size + total_data_size;
+    }
+
+    if result.is_empty() { None } else { Some(result) }
+}
+
 impl OggVorbisFile {
     pub fn open(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
@@ -277,8 +318,8 @@ impl OggVorbisFile {
             }
         }
 
-        // Comment header
-        if let Some(comment_packet) = ogg_first_packet(data, self.page1_size) {
+        // Comment header (may span multiple pages)
+        if let Some(comment_packet) = ogg_assemble_first_packet(data, self.page1_size) {
             if comment_packet.len() >= 7 && &comment_packet[0..7] == b"\x03vorbis" {
                 self.raw_comment_data = comment_packet[7..].to_vec();
                 self.tags_parsed = false;
@@ -388,29 +429,6 @@ impl OggVorbisFile {
         score
     }
 }
-
-/// OGG CRC32 lookup table.
-#[allow(dead_code)]
-const CRC_LOOKUP: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut r = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            if r & 1 != 0 {
-                r = (r >> 1) ^ 0xEDB88320;
-            } else {
-                r >>= 1;
-            }
-            j += 1;
-        }
-        // Actually OGG uses a different polynomial
-        table[i] = r;
-        i += 1;
-    }
-    table
-};
 
 /// Calculate OGG-style CRC32.
 fn ogg_crc(data: &[u8]) -> u32 {

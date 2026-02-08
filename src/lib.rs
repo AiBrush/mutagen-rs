@@ -1266,6 +1266,7 @@ fn parse_ogg_batch(data: &[u8]) -> Option<PreSerializedFile> {
     if first_page_end + 27 > data.len() { return None; }
     if &data[first_page_end..first_page_end+4] != b"OggS" { return None; }
 
+    // Try fast single-page path first (zero-copy), fall back to multi-page assembly
     let seg2_count = data[first_page_end + 26] as usize;
     let seg2_table_start = first_page_end + 27;
     let seg2_table_end = seg2_table_start + seg2_count;
@@ -1273,25 +1274,30 @@ fn parse_ogg_batch(data: &[u8]) -> Option<PreSerializedFile> {
 
     let seg2_table = &data[seg2_table_start..seg2_table_end];
     let mut first_packet_size = 0usize;
+    let mut single_page = false;
     for &seg in seg2_table {
         first_packet_size += seg as usize;
-        if seg < 255 { break; }
+        if seg < 255 { single_page = true; break; }
     }
-
-    let comment_start = seg2_table_end;
-    if comment_start + first_packet_size > data.len() { return None; }
-    if first_packet_size < 7 { return None; }
-    if &data[comment_start..comment_start+7] != b"\x03vorbis" { return None; }
-
-    let vc_offset = comment_start + 7;
-    let vc_size = first_packet_size - 7;
 
     let length = ogg::find_last_granule(data, serial)
         .map(|g| if g > 0 && sample_rate > 0 { g as f64 / sample_rate as f64 } else { 0.0 })
         .unwrap_or(0.0);
 
-    // Lazy VC: copy just the VC raw bytes, defer parsing to dict creation time.
-    let lazy_vc = Some(data[vc_offset..vc_offset + vc_size].to_vec());
+    let lazy_vc = if single_page {
+        // Fast path: packet fits in one page, zero-copy
+        let comment_start = seg2_table_end;
+        if comment_start + first_packet_size > data.len() { return None; }
+        if first_packet_size < 7 { return None; }
+        if &data[comment_start..comment_start+7] != b"\x03vorbis" { return None; }
+        Some(data[comment_start + 7..comment_start + first_packet_size].to_vec())
+    } else {
+        // Slow path: multi-page assembly
+        let comment_packet = ogg::ogg_assemble_first_packet(data, first_page_end)?;
+        if comment_packet.len() < 7 { return None; }
+        if &comment_packet[0..7] != b"\x03vorbis" { return None; }
+        Some(comment_packet[7..].to_vec())
+    };
 
     Some(PreSerializedFile {
         length,
@@ -3053,6 +3059,7 @@ fn fast_read_ogg_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyD
     if first_page_end + 27 > data.len() { return Ok(false); }
     if &data[first_page_end..first_page_end+4] != b"OggS" { return Ok(false); }
 
+    // Try fast single-page path first, fall back to multi-page assembly
     let seg2_count = data[first_page_end + 26] as usize;
     let seg2_table_start = first_page_end + 27;
     let seg2_table_end = seg2_table_start + seg2_count;
@@ -3060,17 +3067,11 @@ fn fast_read_ogg_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyD
 
     let seg2_table = &data[seg2_table_start..seg2_table_end];
     let mut first_packet_size = 0usize;
+    let mut single_page = false;
     for &seg in seg2_table {
         first_packet_size += seg as usize;
-        if seg < 255 { break; }
+        if seg < 255 { single_page = true; break; }
     }
-
-    let comment_start = seg2_table_end;
-    if comment_start + first_packet_size > data.len() { return Ok(false); }
-    if first_packet_size < 7 { return Ok(false); }
-    if &data[comment_start..comment_start+7] != b"\x03vorbis" { return Ok(false); }
-
-    let vc_data = &data[comment_start + 7..comment_start + first_packet_size];
 
     let length = ogg::find_last_granule(data, serial)
         .map(|g| if g > 0 && sample_rate > 0 { g as f64 / sample_rate as f64 } else { 0.0 })
@@ -3084,7 +3085,24 @@ fn fast_read_ogg_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyD
     }
 
     let mut keys_out: Vec<*mut pyo3::ffi::PyObject> = Vec::with_capacity(16);
-    parse_vc_to_dict_direct(py, vc_data, dict, &mut keys_out)?;
+    if single_page {
+        // Fast path: packet fits in one page, zero-copy VC parse
+        let comment_start = seg2_table_end;
+        if comment_start + first_packet_size > data.len() { return Ok(false); }
+        if first_packet_size < 7 { return Ok(false); }
+        if &data[comment_start..comment_start+7] != b"\x03vorbis" { return Ok(false); }
+        let vc_data = &data[comment_start + 7..comment_start + first_packet_size];
+        parse_vc_to_dict_direct(py, vc_data, dict, &mut keys_out)?;
+    } else {
+        // Slow path: multi-page assembly
+        let comment_packet = match ogg::ogg_assemble_first_packet(data, first_page_end) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        if comment_packet.len() < 7 { return Ok(false); }
+        if &comment_packet[0..7] != b"\x03vorbis" { return Ok(false); }
+        parse_vc_to_dict_direct(py, &comment_packet[7..], dict, &mut keys_out)?;
+    }
     set_keys_list(py, dict, keys_out)?;
     Ok(true)
 }
