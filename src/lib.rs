@@ -1114,7 +1114,7 @@ fn parse_vc_to_batch_tags(data: &[u8]) -> Vec<(String, BatchTagValue)> {
 
 /// Batch-optimized FLAC parser: skips pictures, direct VC parsing.
 #[inline(always)]
-fn parse_flac_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
+fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
     let flac_offset = if data.len() >= 4 && &data[0..4] == b"fLaC" {
         0
     } else if data.len() >= 10 && &data[0..3] == b"ID3" {
@@ -1156,7 +1156,8 @@ fn parse_flac_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSer
         }
 
         pos += block_size;
-        if is_last { break; }
+        // Early break: we only need StreamInfo + VC, skip remaining blocks
+        if is_last || (sample_rate > 0 && vc_pos.is_some()) { break; }
     }
 
     if sample_rate == 0 { return None; }
@@ -1178,7 +1179,7 @@ fn parse_flac_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSer
 
 /// Batch-optimized OGG Vorbis parser: inline page headers, direct VC parsing.
 #[inline(always)]
-fn parse_ogg_batch(data: &[u8], _data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
+fn parse_ogg_batch(data: &[u8]) -> Option<PreSerializedFile> {
     if data.len() < 58 || &data[0..4] != b"OggS" { return None; }
 
     let serial = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
@@ -1328,13 +1329,13 @@ fn parse_mp4_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
 /// Parse + fully decode a single file from data (runs in parallel phase).
 /// Uses extension-based fast dispatch to skip unnecessary scoring.
 #[inline(always)]
-fn parse_and_serialize(data: &[u8], path: &str, data_arc: Option<&Arc<[u8]>>) -> Option<PreSerializedFile> {
+fn parse_and_serialize(data: &[u8], path: &str) -> Option<PreSerializedFile> {
     let ext = path.rsplit('.').next().unwrap_or("");
     if ext.eq_ignore_ascii_case("flac") {
-        return parse_flac_batch(data, data_arc);
+        return parse_flac_batch(data);
     }
     if ext.eq_ignore_ascii_case("ogg") {
-        return parse_ogg_batch(data, data_arc);
+        return parse_ogg_batch(data);
     }
     if ext.eq_ignore_ascii_case("mp3") {
         return parse_mp3_batch(data, path);
@@ -1355,9 +1356,9 @@ fn parse_and_serialize(data: &[u8], path: &str, data_arc: Option<&Arc<[u8]>>) ->
     }
 
     if max_score == flac_score {
-        parse_flac_batch(data, data_arc)
+        parse_flac_batch(data)
     } else if max_score == ogg_score {
-        parse_ogg_batch(data, data_arc)
+        parse_ogg_batch(data)
     } else if max_score == mp4_score {
         parse_mp4_batch(data, path)
     } else {
@@ -1476,34 +1477,114 @@ fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<
         if let Some(br) = pf.bitrate {
             set_dict_u32(inner, pyo3::intern!(py, "bitrate").as_ptr(), br);
         }
-        // Materialize lazy VC tags on demand if needed
-        let lazy_tags;
-        let tags = if pf.tags.is_empty() {
+        // Direct VC→Python FFI path: skip Rust String intermediary for lazy VC
+        if pf.tags.is_empty() {
             if let Some(ref vc_bytes) = pf.lazy_vc {
-                lazy_tags = parse_vc_to_batch_tags(vc_bytes);
-                &lazy_tags
+                let tags_dict = pyo3::ffi::_PyDict_NewPresized(16);
+                if !tags_dict.is_null() {
+                    parse_vc_to_ffi_dict(vc_bytes, tags_dict);
+                    pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
+                    pyo3::ffi::Py_DECREF(tags_dict);
+                }
             } else {
-                &pf.tags
+                // Empty tags
+                let tags_dict = pyo3::ffi::_PyDict_NewPresized(0);
+                if !tags_dict.is_null() {
+                    pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
+                    pyo3::ffi::Py_DECREF(tags_dict);
+                }
             }
         } else {
-            &pf.tags
-        };
-        let tags_dict = pyo3::ffi::_PyDict_NewPresized(tags.len() as pyo3::ffi::Py_ssize_t);
-        if !tags_dict.is_null() {
-            for (key, value) in tags {
-                let key_ptr = intern_tag_key(key.as_bytes());
-                if key_ptr.is_null() { continue; }
-                let val_ptr = batch_value_to_py_ffi(py, value);
-                if !val_ptr.is_null() {
-                    pyo3::ffi::PyDict_SetItem(tags_dict, key_ptr, val_ptr);
-                    pyo3::ffi::Py_DECREF(val_ptr);
+            let tags_dict = pyo3::ffi::_PyDict_NewPresized(pf.tags.len() as pyo3::ffi::Py_ssize_t);
+            if !tags_dict.is_null() {
+                for (key, value) in &pf.tags {
+                    let key_ptr = intern_tag_key(key.as_bytes());
+                    if key_ptr.is_null() { continue; }
+                    let val_ptr = batch_value_to_py_ffi(py, value);
+                    if !val_ptr.is_null() {
+                        pyo3::ffi::PyDict_SetItem(tags_dict, key_ptr, val_ptr);
+                        pyo3::ffi::Py_DECREF(val_ptr);
+                    }
+                    pyo3::ffi::Py_DECREF(key_ptr);
                 }
-                pyo3::ffi::Py_DECREF(key_ptr);
+                pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
+                pyo3::ffi::Py_DECREF(tags_dict);
             }
-            pyo3::ffi::PyDict_SetItem(inner, pyo3::intern!(py, "tags").as_ptr(), tags_dict);
-            pyo3::ffi::Py_DECREF(tags_dict);
         }
         Ok(Py::from_owned_ptr(py, inner))
+    }
+}
+
+/// Parse VC bytes directly into a Python dict using raw FFI.
+/// Skips intermediate Rust String allocations — goes from raw bytes straight to Python objects.
+/// Values are wrapped in lists (VC format: duplicate keys are merged into a single list).
+#[inline(always)]
+unsafe fn parse_vc_to_ffi_dict(data: &[u8], tags_dict: *mut pyo3::ffi::PyObject) {
+    if data.len() < 8 { return; }
+    let mut pos = 0;
+    let vendor_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+    if pos + vendor_len > data.len() { return; }
+    pos += vendor_len;
+    if pos + 4 > data.len() { return; }
+    let count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+
+    for _ in 0..count.min(256) {
+        if pos + 4 > data.len() { break; }
+        let clen = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        pos += 4;
+        if pos + clen > data.len() { break; }
+        let raw = &data[pos..pos + clen];
+        pos += clen;
+
+        let eq_pos = match memchr::memchr(b'=', raw) {
+            Some(p) => p,
+            None => continue,
+        };
+        let key_bytes = &raw[..eq_pos];
+        let value_bytes = &raw[eq_pos + 1..];
+
+        // Uppercase key into stack buffer (no heap allocation)
+        let mut buf = [0u8; 128];
+        let key_len = key_bytes.len().min(128);
+        for i in 0..key_len { buf[i] = key_bytes[i].to_ascii_uppercase(); }
+
+        let key_ptr = intern_tag_key(&buf[..key_len]);
+        if key_ptr.is_null() { pyo3::ffi::PyErr_Clear(); continue; }
+
+        let val_ptr = pyo3::ffi::PyUnicode_FromStringAndSize(
+            value_bytes.as_ptr() as *const std::ffi::c_char,
+            value_bytes.len() as pyo3::ffi::Py_ssize_t);
+        if val_ptr.is_null() {
+            pyo3::ffi::PyErr_Clear();
+            pyo3::ffi::Py_DECREF(key_ptr);
+            continue;
+        }
+
+        // Check for duplicate keys (merge into list)
+        let existing = pyo3::ffi::PyDict_GetItem(tags_dict, key_ptr);
+        if !existing.is_null() {
+            if pyo3::ffi::PyList_Check(existing) != 0 {
+                pyo3::ffi::PyList_Append(existing, val_ptr);
+                pyo3::ffi::Py_DECREF(val_ptr);
+            } else {
+                let list = pyo3::ffi::PyList_New(2);
+                pyo3::ffi::Py_INCREF(existing);
+                pyo3::ffi::PyList_SET_ITEM(list, 0, existing);
+                pyo3::ffi::PyList_SET_ITEM(list, 1, val_ptr);
+                pyo3::ffi::PyDict_SetItem(tags_dict, key_ptr, list);
+                pyo3::ffi::Py_DECREF(list);
+            }
+            pyo3::ffi::Py_DECREF(key_ptr);
+        } else {
+            // New key: wrap value in single-element list
+            let list = pyo3::ffi::PyList_New(1);
+            pyo3::ffi::PyList_SET_ITEM(list, 0, val_ptr);
+            pyo3::ffi::PyDict_SetItem(tags_dict, key_ptr, list);
+            pyo3::ffi::Py_DECREF(list);
+            pyo3::ffi::Py_DECREF(key_ptr);
+        }
     }
 }
 
@@ -1701,9 +1782,7 @@ impl PyBatchResult {
 }
 
 /// Batch open: read and parse multiple files in parallel using rayon.
-/// Uses chunked parallel iteration to amortize rayon scheduling overhead
-/// (individual files parse in ~1µs, rayon per-task overhead is ~5-10µs).
-/// No result caching — every call does real parsing work.
+/// Returns a lazy PyBatchResult that materializes dicts on demand (better GC behavior).
 ///
 /// For large files (>32KB), uses mmap to avoid reading unused audio data
 /// (e.g., OGG parser only accesses headers + last 8KB of a 136KB file).
@@ -1716,24 +1795,44 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
         if n == 0 { return Vec::new(); }
 
         // min_len(4): small enough for work-stealing, large enough to avoid rayon overhead.
-        // Large files (>32KB) use mmap to skip reading unused audio data.
-        // Single file open: read metadata for size check, then read or mmap from same handle.
+        // Format-specific I/O: FLAC uses partial reads (metadata at file start),
+        // large files use mmap, small files use read_to_end.
         (0..n).into_par_iter()
             .with_min_len(4)
             .filter_map(|i| {
-                use std::io::Read;
+                use std::io::{Read, Seek};
                 let path = &filenames[i];
+                let ext = path.rsplit('.').next().unwrap_or("");
                 let mut file = std::fs::File::open(path).ok()?;
                 let meta = file.metadata().ok()?;
-                let pf = if meta.len() > 32768 {
-                    // Large file: mmap avoids reading unused audio data
-                    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
-                    parse_and_serialize(&mmap, path, None)
-                } else {
-                    // Small file: read entire file from already-opened handle
-                    let mut data = Vec::with_capacity(meta.len() as usize);
+                let file_len = meta.len() as usize;
+
+                // FLAC: partial read — metadata (StreamInfo + VC) is at file start.
+                // Read only 4KB initially; fall back to full read if VC extends beyond.
+                if ext.eq_ignore_ascii_case("flac") && file_len > 4096 {
+                    let mut buf = vec![0u8; 4096];
+                    let n = file.read(&mut buf).ok()?;
+                    buf.truncate(n);
+                    if let Some(pf) = parse_flac_batch(&buf) {
+                        if pf.lazy_vc.is_some() {
+                            return Some((path.clone(), pf));
+                        }
+                        // VC not found in 4KB — might be beyond buffer or genuinely absent
+                    }
+                    // Fall back to full read
+                    file.seek(std::io::SeekFrom::Start(0)).ok()?;
+                    let mut data = Vec::with_capacity(file_len);
                     file.read_to_end(&mut data).ok()?;
-                    parse_and_serialize(&data, path, None)
+                    return parse_flac_batch(&data).map(|pf| (path.clone(), pf));
+                }
+
+                let pf = if file_len > 32768 {
+                    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+                    parse_and_serialize(&mmap, path)
+                } else {
+                    let mut data = Vec::with_capacity(file_len);
+                    file.read_to_end(&mut data).ok()?;
+                    parse_and_serialize(&data, path)
                 }?;
                 Some((path.clone(), pf))
             })
@@ -1756,15 +1855,25 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
     use rayon::prelude::*;
 
     // Phase 1: Parallel read + parse (outside GIL)
+    // Uses mmap for large files (>32KB), read_to_end for small cached files.
     let parsed: Vec<(String, PreSerializedFile)> = py.detach(|| {
         let n = filenames.len();
         if n == 0 { return Vec::new(); }
         (0..n).into_par_iter()
-            .with_min_len(16)
+            .with_min_len(4)
             .filter_map(|i| {
+                use std::io::Read;
                 let path = &filenames[i];
-                let data = read_direct(path).ok()?;
-                let pf = parse_and_serialize(&data, path, None)?;
+                let mut file = std::fs::File::open(path).ok()?;
+                let meta = file.metadata().ok()?;
+                let pf = if meta.len() > 32768 {
+                    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+                    parse_and_serialize(&mmap, path)
+                } else {
+                    let mut data = Vec::with_capacity(meta.len() as usize);
+                    file.read_to_end(&mut data).ok()?;
+                    parse_and_serialize(&data, path)
+                }?;
                 Some((path.clone(), pf))
             })
             .collect()
@@ -1798,38 +1907,25 @@ fn _fast_batch_read(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny
                 pyo3::ffi::Py_DECREF(key_ptr);
             }
 
-            // Tags via raw FFI
-            let lazy_tags;
-            let tags = if pf.tags.is_empty() {
+            // Tags: direct VC→FFI path for lazy VC, standard path otherwise
+            if pf.tags.is_empty() {
                 if let Some(ref vc_bytes) = pf.lazy_vc {
-                    lazy_tags = parse_vc_to_batch_tags(vc_bytes);
-                    &lazy_tags
-                } else {
-                    &pf.tags
+                    // Direct VC→Python: skip Rust String intermediary
+                    parse_vc_to_ffi_dict(vc_bytes, dict_ptr);
                 }
             } else {
-                &pf.tags
-            };
-
-            let mut key_ptrs: Vec<*mut pyo3::ffi::PyObject> = Vec::with_capacity(tags.len());
-            for (key, value) in tags {
-                let py_val = batch_value_to_py(py, value)?;
-                let key_ptr = intern_tag_key(key.as_bytes());
-                pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val.as_ptr());
-                key_ptrs.push(key_ptr);
-            }
-
-            // Set _keys list
-            let keys_list = pyo3::ffi::PyList_New(key_ptrs.len() as pyo3::ffi::Py_ssize_t);
-            for (i, key_ptr) in key_ptrs.iter().enumerate() {
-                pyo3::ffi::Py_INCREF(*key_ptr);
-                pyo3::ffi::PyList_SET_ITEM(keys_list, i as pyo3::ffi::Py_ssize_t, *key_ptr);
-            }
-            let keys_key = pyo3::intern!(py, "_keys");
-            pyo3::ffi::PyDict_SetItem(dict_ptr, keys_key.as_ptr(), keys_list);
-            pyo3::ffi::Py_DECREF(keys_list);
-            for key_ptr in key_ptrs {
-                pyo3::ffi::Py_DECREF(key_ptr);
+                for (key, value) in &pf.tags {
+                    let py_val = batch_value_to_py_ffi(py, value);
+                    if py_val.is_null() { continue; }
+                    let key_ptr = intern_tag_key(key.as_bytes());
+                    if key_ptr.is_null() {
+                        pyo3::ffi::Py_DECREF(py_val);
+                        continue;
+                    }
+                    pyo3::ffi::PyDict_SetItem(dict_ptr, key_ptr, py_val);
+                    pyo3::ffi::Py_DECREF(py_val);
+                    pyo3::ffi::Py_DECREF(key_ptr);
+                }
             }
 
             // Insert into result dict: path → flat dict
@@ -1863,14 +1959,14 @@ fn batch_diag(py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
         // Phase 2: Sequential parse (no I/O)
         let t2 = Instant::now();
         let _: Vec<_> = file_data.iter()
-            .filter_map(|(p, d)| parse_and_serialize(d, p, None).map(|pf| (p.clone(), pf)))
+            .filter_map(|(p, d)| parse_and_serialize(d, p).map(|pf| (p.clone(), pf)))
             .collect();
         let parse_seq_us = t2.elapsed().as_micros();
 
         // Phase 3: Parallel parse (no I/O)
         let t3 = Instant::now();
         let _: Vec<_> = file_data.par_iter()
-            .filter_map(|(p, d)| parse_and_serialize(d, p, None).map(|pf| (p.clone(), pf)))
+            .filter_map(|(p, d)| parse_and_serialize(d, p).map(|pf| (p.clone(), pf)))
             .collect();
         let parse_par_us = t3.elapsed().as_micros();
 
@@ -1878,7 +1974,7 @@ fn batch_diag(py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
         let t4 = Instant::now();
         let _: Vec<_> = filenames.par_iter().filter_map(|path| {
             let data = read_direct(path).ok()?;
-            let pf = parse_and_serialize(&data, path, None)?;
+            let pf = parse_and_serialize(&data, path)?;
             Some((path.clone(), pf))
         }).collect();
         let full_par_us = t4.elapsed().as_micros();
@@ -3252,7 +3348,7 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
         fast_read_mp4_direct(py, &data, filename, &dict)?
     } else {
         // Fallback: score-based detection via PreSerializedFile
-        if let Some(pf) = parse_and_serialize(&data, filename, None) {
+        if let Some(pf) = parse_and_serialize(&data, filename) {
             preserialized_to_flat_dict(py, &pf, &dict)?;
             true
         } else {
@@ -3306,7 +3402,7 @@ fn _fast_read_seq(py: Python<'_>, filenames: Vec<String>) -> PyResult<Py<PyAny>>
                     || ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("m4v") {
                 fast_read_mp4_direct(py, &data, filename, &dict).unwrap_or(false)
             } else {
-                if let Some(pf) = parse_and_serialize(&data, filename, None) {
+                if let Some(pf) = parse_and_serialize(&data, filename) {
                     preserialized_to_flat_dict(py, &pf, &dict).unwrap_or(());
                     true
                 } else {
