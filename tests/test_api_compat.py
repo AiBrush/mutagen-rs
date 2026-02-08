@@ -6,6 +6,16 @@ Validates info fields, tag keys, tag values, and API behavior.
 import os
 import pytest
 
+
+def test_module_import():
+    """Verify mutagen_rs module loads correctly."""
+    import mutagen_rs
+    assert hasattr(mutagen_rs, 'MP3')
+    assert hasattr(mutagen_rs, 'FLAC')
+    assert hasattr(mutagen_rs, 'OggVorbis')
+    assert hasattr(mutagen_rs, 'MP4')
+    assert hasattr(mutagen_rs, 'File')
+
 from mutagen.mp3 import MP3
 from mutagen.flac import FLAC
 from mutagen.oggvorbis import OggVorbis
