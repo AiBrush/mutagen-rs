@@ -1584,9 +1584,11 @@ fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
 }
 
 /// Lazy batch result — stores parsed Rust data, creates Python objects on demand.
+/// Uses HashMap for O(1) path lookup instead of O(n) linear search.
 #[pyclass(name = "BatchResult")]
 struct PyBatchResult {
     files: Vec<(String, PreSerializedFile)>,
+    index: HashMap<String, usize>,  // path → index in files Vec
 }
 
 #[pymethods]
@@ -1600,14 +1602,13 @@ impl PyBatchResult {
     }
 
     fn __contains__(&self, path: &str) -> bool {
-        self.files.iter().any(|(p, _)| p == path)
+        self.index.contains_key(path)
     }
 
     fn __getitem__(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
-        for (p, pf) in &self.files {
-            if p == path {
-                return preserialized_to_py_dict(py, pf);
-            }
+        if let Some(&idx) = self.index.get(path) {
+            let (_, pf) = &self.files[idx];
+            return preserialized_to_py_dict(py, pf);
         }
         Err(PyKeyError::new_err(path.to_string()))
     }
@@ -1671,7 +1672,12 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
             .collect()
     });
 
-    Ok(PyBatchResult { files })
+    // Build O(1) index for __getitem__ lookups
+    let index: HashMap<String, usize> = files.iter().enumerate()
+        .map(|(i, (path, _))| (path.clone(), i))
+        .collect();
+
+    Ok(PyBatchResult { files, index })
 }
 
 /// Diagnostic version: measures I/O vs parse vs parallel overhead.
