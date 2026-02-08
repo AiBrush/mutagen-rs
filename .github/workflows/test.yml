@@ -1,0 +1,229 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Stage 1: Unit Tests ────────────────────────────────────────────
+  test-python:
+    name: Test (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-python
+      - name: Install dependencies
+        run: pip install maturin mutagen pytest
+      - name: Build and install
+        run: |
+          maturin build --release --out dist
+          pip install dist/*.whl
+      - name: Run tests
+        run: python -m pytest tests/test_api_compat.py -v
+
+  test-rust:
+    name: Test (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test-rust
+      - name: Run tests
+        run: cargo test --release
+      - name: Check (no warnings)
+        run: cargo check --release 2>&1
+
+  # ── Stage 2: Benchmarks ───────────────────────────────────────────
+  bench-python:
+    name: Benchmark (Python)
+    needs: [test-python]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-python
+      - name: Install dependencies
+        run: pip install maturin mutagen
+      - name: Build and install
+        run: |
+          maturin build --release --out dist
+          pip install dist/*.whl
+      - name: Run benchmarks
+        run: python tests/test_performance.py
+      - name: Upload results
+        uses: actions/upload-artifact@v5
+        with:
+          name: bench-python-results
+          path: benchmarks/performance_results.json
+
+  bench-rust:
+    name: Benchmark (Rust)
+    needs: [test-rust]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-rust
+      - name: Run criterion benchmarks
+        run: cargo bench --bench parse_comparison 2>&1 | tee bench_output.txt
+      - name: Parse criterion results
+        run: |
+          python3 -c "
+          import re, json, sys
+
+          results = {}
+          with open('bench_output.txt') as f:
+              for line in f:
+                  # Match: 'group/name   time: [low est high]'
+                  m = re.search(r'(\w+)/(\w+)\s+time:\s+\[[\d.]+ \w+ ([\d.]+) (\w+)', line)
+                  if m:
+                      group, name, val, unit = m.groups()
+                      ns = float(val)
+                      if unit == 'µs' or unit == 'us':
+                          ns *= 1000
+                      elif unit == 'ms':
+                          ns *= 1_000_000
+                      key = f'{group}/{name}'
+                      results[key] = ns
+
+          with open('bench_rust_results.json', 'w') as f:
+              json.dump(results, f, indent=2)
+
+          print(json.dumps(results, indent=2))
+          "
+      - name: Upload results
+        uses: actions/upload-artifact@v5
+        with:
+          name: bench-rust-results
+          path: bench_rust_results.json
+
+  # ── Stage 3: Compare Results ───────────────────────────────────────
+  compare:
+    name: Compare Benchmarks
+    needs: [bench-python, bench-rust]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: bench-python-results
+          path: results
+      - uses: actions/download-artifact@v6
+        with:
+          name: bench-rust-results
+          path: results
+
+      - name: Compare and report
+        run: |
+          python3 -c "
+          import json, sys
+
+          # ── Python: mutagen_rs vs mutagen ──
+          with open('results/performance_results.json') as f:
+              py = json.load(f)
+
+          print('=' * 60)
+          print('PYTHON: mutagen_rs vs mutagen')
+          print('=' * 60)
+
+          py_pass = True
+          for fmt in ['mp3', 'flac', 'ogg', 'mp4']:
+              if fmt not in py:
+                  continue
+              d = py[fmt]
+              cold = d.get('speedup_cold', 0)
+              warm = d.get('speedup_warm', 0)
+              status = '✅' if cold >= 5 else '❌'
+              if cold < 5:
+                  py_pass = False
+              print(f'  {fmt.upper():5s}  cold={cold:6.1f}x  warm={warm:7.1f}x  {status}')
+
+          if 'auto_detect' in py:
+              d = py['auto_detect']
+              cold = d.get('speedup_cold', 0)
+              status = '✅' if cold >= 5 else '❌'
+              if cold < 5:
+                  py_pass = False
+              print(f'  AUTO   cold={cold:6.1f}x  warm={d.get(\"speedup_warm\", 0):7.1f}x  {status}')
+
+          print()
+          print('BATCH:')
+          for key in ['batch_mp3', 'batch_flac', 'batch_ogg', 'batch_mp4', 'batch_auto_detect']:
+              if key not in py:
+                  continue
+              d = py[key]
+              speedup = d.get('speedup', 0)
+              label = key.replace('batch_', '').upper()
+              status = '✅' if speedup >= 10 else '❌'
+              if speedup < 10:
+                  py_pass = False
+              print(f'  {label:5s}  speedup={speedup:6.1f}x  {status}')
+
+          print()
+
+          # ── Rust: mutagen_rs vs lofty ──
+          print('=' * 60)
+          print('RUST: mutagen_rs vs lofty-rs (criterion)')
+          print('=' * 60)
+
+          rust_pass = True
+          try:
+              with open('results/bench_rust_results.json') as f:
+                  rust = json.load(f)
+
+              # Group by benchmark group
+              groups = {}
+              for key, ns in rust.items():
+                  group, name = key.split('/')
+                  groups.setdefault(group, {})[name] = ns
+
+              for group, times in sorted(groups.items()):
+                  mrs = times.get('mutagen_rs', 0)
+                  lofty = times.get('lofty', 0)
+                  if mrs > 0 and lofty > 0:
+                      speedup = lofty / mrs
+                      status = '✅' if speedup >= 5 else '❌'
+                      if speedup < 5:
+                          rust_pass = False
+                      print(f'  {group:15s}  mutagen_rs={mrs:8.0f}ns  lofty={lofty:10.0f}ns  {speedup:6.0f}x  {status}')
+                  else:
+                      print(f'  {group:15s}  (incomplete data)')
+          except Exception as e:
+              print(f'  Failed to parse Rust results: {e}')
+              rust_pass = False
+
+          print()
+          print('=' * 60)
+          overall = '✅ ALL PASSED' if (py_pass and rust_pass) else '❌ SOME CHECKS FAILED'
+          print(f'RESULT: {overall}')
+          print('=' * 60)
+
+          if not (py_pass and rust_pass):
+              sys.exit(1)
+          "
