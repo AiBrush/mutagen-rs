@@ -1704,6 +1704,9 @@ impl PyBatchResult {
 /// Uses chunked parallel iteration to amortize rayon scheduling overhead
 /// (individual files parse in ~1µs, rayon per-task overhead is ~5-10µs).
 /// No result caching — every call does real parsing work.
+///
+/// For large files (>32KB), uses mmap to avoid reading unused audio data
+/// (e.g., OGG parser only accesses headers + last 8KB of a 136KB file).
 #[pyfunction]
 fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult> {
     use rayon::prelude::*;
@@ -1712,16 +1715,26 @@ fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult>
         let n = filenames.len();
         if n == 0 { return Vec::new(); }
 
-        // Use index-based iteration with min_len to amortize rayon overhead.
-        // Each rayon task processes at least 16 files sequentially.
-        // Bypass file cache — read directly, avoid RwLock + HashMap + Arc overhead.
         // min_len(4): small enough for work-stealing, large enough to avoid rayon overhead.
+        // Large files (>32KB) use mmap to skip reading unused audio data.
+        // Single file open: read metadata for size check, then read or mmap from same handle.
         (0..n).into_par_iter()
             .with_min_len(4)
             .filter_map(|i| {
+                use std::io::Read;
                 let path = &filenames[i];
-                let data = read_direct(path).ok()?;
-                let pf = parse_and_serialize(&data, path, None)?;
+                let mut file = std::fs::File::open(path).ok()?;
+                let meta = file.metadata().ok()?;
+                let pf = if meta.len() > 32768 {
+                    // Large file: mmap avoids reading unused audio data
+                    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+                    parse_and_serialize(&mmap, path, None)
+                } else {
+                    // Small file: read entire file from already-opened handle
+                    let mut data = Vec::with_capacity(meta.len() as usize);
+                    file.read_to_end(&mut data).ok()?;
+                    parse_and_serialize(&data, path, None)
+                }?;
                 Some((path.clone(), pf))
             })
             .collect()
