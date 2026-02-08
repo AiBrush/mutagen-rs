@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: "Dry run (don't push or publish)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release:
+    name: Bump version, merge, and tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get current version
+        id: current
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Current version: $VERSION"
+
+      - name: Compute next version
+        id: next
+        run: |
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${{ steps.current.outputs.version }}"
+          case "${{ inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEXT"
+
+      - name: Install Rust (for Cargo.lock update)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Create release branch
+        id: branch
+        run: |
+          BRANCH="release/v${{ steps.next.outputs.version }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH"
+
+      - name: Update Cargo.toml version
+        run: |
+          sed -i "0,/^version = \".*\"/s//version = \"${{ steps.next.outputs.version }}\"/" Cargo.toml
+          echo "Updated Cargo.toml:"
+          grep '^version = ' Cargo.toml | head -1
+
+      - name: Update Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Commit version bump
+        run: |
+          git add Cargo.toml Cargo.lock
+          git commit -m "release: v${{ steps.next.outputs.version }}"
+
+      - name: Push branch and create PR
+        if: ${{ !inputs.dry_run }}
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          git push origin "$BRANCH"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "release: v${{ steps.next.outputs.version }}" \
+            --body "Automated version bump: ${{ steps.current.outputs.version }} → ${{ steps.next.outputs.version }} (${{ inputs.bump }})")
+
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Created PR #$PR_NUMBER"
+
+      - name: Merge PR (squash)
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ steps.pr.outputs.pr_number }} \
+            --squash \
+            --delete-branch \
+            --subject "release: v${{ steps.next.outputs.version }}"
+
+      - name: Tag merged commit and trigger CI
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Pull the squash-merged commit
+          git fetch origin main
+          git checkout main
+          git pull origin main
+
+          # Tag it
+          TAG="v${{ steps.next.outputs.version }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          # GITHUB_TOKEN pushes don't trigger workflows, so explicitly
+          # trigger CI on the tag ref (workflow_dispatch is exempt from
+          # the GITHUB_TOKEN event-suppression rule)
+          gh workflow run CI.yml --ref "$TAG"
+          echo "Triggered CI workflow on $TAG"
+
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Previous version**: ${{ steps.current.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **New version**: ${{ steps.next.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Bump type**: ${{ inputs.bump }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "- **Status**: Dry run (nothing pushed)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Status**: Tag \`v${{ steps.next.outputs.version }}\` pushed and CI triggered" >> "$GITHUB_STEP_SUMMARY"
+          fi
