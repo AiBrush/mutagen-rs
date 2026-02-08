@@ -272,7 +272,16 @@ impl ID3Tags {
 
             let id_bytes = &data[offset..offset + 3];
             if !id_bytes.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
-                break;
+                offset += 1;
+                while offset + 6 <= data.len() {
+                    if data[offset] == 0 { break; }
+                    let next_id = &data[offset..offset + 3];
+                    if next_id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+                        break;
+                    }
+                    offset += 1;
+                }
+                continue;
             }
 
             let size = ((data[offset + 3] as usize) << 16)
@@ -281,7 +290,10 @@ impl ID3Tags {
 
             offset += 6;
 
-            if size == 0 || offset + size > data.len() {
+            if size == 0 {
+                continue;
+            }
+            if offset + size > data.len() {
                 break;
             }
 
@@ -332,7 +344,17 @@ impl ID3Tags {
                 .iter()
                 .all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit())
             {
-                break;
+                // Scan forward for next valid frame header
+                offset += 1;
+                while offset + 10 <= data.len() {
+                    if data[offset] == 0 { break; }
+                    let next_id = &data[offset..offset + 4];
+                    if next_id.iter().all(|&b| b.is_ascii_uppercase() || b.is_ascii_digit()) {
+                        break;
+                    }
+                    offset += 1;
+                }
+                continue;
             }
 
             let size = BitPaddedInt::decode(&data[offset + 4..offset + 8], bpi) as usize;
@@ -340,7 +362,10 @@ impl ID3Tags {
 
             offset += 10;
 
-            if size == 0 || offset + size > data.len() {
+            if size == 0 {
+                continue;
+            }
+            if offset + size > data.len() {
                 break;
             }
 
@@ -521,7 +546,7 @@ fn quick_hash_key_from_buf(id: &[u8; 4], buf: &[u8], offset: u32, len: u32) -> H
     quick_hash_key(id_str, data)
 }
 
-fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
 
