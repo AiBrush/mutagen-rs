@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/mutagen-rs)](https://pypi.org/project/mutagen-rs/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing.
+High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 430x faster** metadata parsing and **up to 48x faster** batch processing.
 
 ## Performance
 
@@ -15,21 +15,21 @@ All benchmarks measure full tag parsing + info extraction + iteration of all key
 
 | Format | mutagen (Python) | mutagen-rs cold | mutagen-rs warm | Cold speedup | Warm speedup |
 |--------|-----------------|-----------------|-----------------|-------------|-------------|
-| MP3    | 0.286 ms/file   | 0.012 ms/file   | 0.0009 ms/file  | **24x**     | **337x**    |
-| FLAC   | 0.123 ms/file   | 0.011 ms/file   | 0.0007 ms/file  | **11x**     | **167x**    |
-| OGG    | 0.254 ms/file   | 0.020 ms/file   | 0.0006 ms/file  | **13x**     | **397x**    |
-| MP4    | 0.253 ms/file   | 0.013 ms/file   | 0.0007 ms/file  | **20x**     | **382x**    |
-| Auto   | 0.345 ms/file   | 0.014 ms/file   | 0.0008 ms/file  | **24x**     | **432x**    |
+| MP3    | 0.286 ms/file   | 0.010 ms/file   | 0.0008 ms/file  | **28x**     | **338x**    |
+| FLAC   | 0.116 ms/file   | 0.010 ms/file   | 0.0007 ms/file  | **12x**     | **156x**    |
+| OGG    | 0.260 ms/file   | 0.015 ms/file   | 0.0006 ms/file  | **18x**     | **413x**    |
+| MP4    | 0.254 ms/file   | 0.011 ms/file   | 0.0007 ms/file  | **23x**     | **382x**    |
+| Auto   | 0.341 ms/file   | 0.012 ms/file   | 0.0008 ms/file  | **28x**     | **426x**    |
 
 ### Batch (Rust rayon parallel vs Python sequential)
 
 | Format | mutagen (Python) | mutagen-rs batch | Speedup |
 |--------|-----------------|------------------|---------|
-| MP3    | 0.313 ms/file   | 0.009 ms/file    | **34x** |
-| FLAC   | 0.122 ms/file   | 0.012 ms/file    | **10x** |
-| OGG    | 0.241 ms/file   | 0.032 ms/file    | **8x**  |
-| MP4    | 0.284 ms/file   | 0.014 ms/file    | **20x** |
-| Auto   | 0.363 ms/file   | 0.020 ms/file    | **19x** |
+| MP3    | 0.301 ms/file   | 0.006 ms/file    | **48x** |
+| FLAC   | 0.124 ms/file   | 0.008 ms/file    | **17x** |
+| OGG    | 0.242 ms/file   | 0.013 ms/file    | **18x** |
+| MP4    | 0.271 ms/file   | 0.010 ms/file    | **28x** |
+| Auto   | 0.340 ms/file   | 0.008 ms/file    | **44x** |
 
 **Methodology:**
 - **Cold**: Both file and result caches cleared. Both sides read from disk (OS page cache benefits both equally).
@@ -146,8 +146,9 @@ python/
 - **Raw CPython FFI**: Direct `PyDict_SetItem`/`PyUnicode_FromStringAndSize` calls bypass PyO3 wrapper overhead
 - **mimalloc**: Global allocator for reduced allocation overhead
 - **Fat LTO**: Whole-program link-time optimization with `codegen-units = 1`
-- **Interned keys**: `pyo3::intern!` for repeated Python string creation
-- **SIMD search**: `memchr`/`memmem` for MP3 sync finding and Vorbis key=value splitting
+- **Interned keys**: `pyo3::intern!` for info fields + thread-local cache for tag keys (ID3 frame IDs, Vorbis comment keys)
+- **SIMD search**: `memchr`/`memmem` for MP3 sync finding, Vorbis key=value splitting, and OGG page scanning
+- **O(1) batch lookup**: HashMap index for batch result access (avoids O(n) linear search)
 
 ## Development
 
