@@ -6,6 +6,11 @@ Validates info fields, tag keys, tag values, and API behavior.
 import os
 import pytest
 
+
+def test_intentional_failure():
+    """This test is intentionally broken to verify CI blocks the merge."""
+    assert 1 == 2, "This PR should not be mergeable"
+
 from mutagen.mp3 import MP3
 from mutagen.flac import FLAC
 from mutagen.oggvorbis import OggVorbis
