@@ -38,6 +38,7 @@ from .mutagen_rs import (
 
     # Clear Rust-level caches
     clear_cache as _rust_clear_cache,
+    clear_all_caches as _rust_clear_all_caches,
 
     # Error types (re-exported as-is)
     MutagenError,
@@ -268,8 +269,16 @@ def batch_open(filenames):
 
 
 def clear_cache():
-    """Clear the Python and Rust file caches."""
+    """Clear the Python and Rust result caches."""
     _cache.clear()
     _last_batch[0] = None
     _last_batch[1] = None
     _rust_clear_cache()
+
+
+def clear_all_caches():
+    """Clear ALL caches including raw file data and templates."""
+    _cache.clear()
+    _last_batch[0] = None
+    _last_batch[1] = None
+    _rust_clear_all_caches()

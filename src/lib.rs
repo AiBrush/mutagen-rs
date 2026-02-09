@@ -30,7 +30,7 @@ fn read_cached(path: &str) -> std::io::Result<Arc<[u8]>> {
             return Ok(Arc::clone(data));
         }
     }
-    let data: Arc<[u8]> = std::fs::read(path)?.into();
+    let data: Arc<[u8]> = fast_file_read(path)?.into();
     {
         let mut guard = cache.write().unwrap();
         if let Some(existing) = guard.get(path) {
@@ -39,6 +39,107 @@ fn read_cached(path: &str) -> std::io::Result<Arc<[u8]>> {
         guard.insert(path.to_string(), Arc::clone(&data));
     }
     Ok(data)
+}
+
+/// Fast file read using raw libc syscalls.
+/// Avoids Rust's Path→OsString→CString conversion and uses O_NOATIME on Linux.
+#[cfg(feature = "python")]
+#[inline]
+fn fast_file_read(path: &str) -> std::io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        fast_file_read_unix(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::read(path)
+    }
+}
+
+#[cfg(all(feature = "python", unix))]
+fn fast_file_read_unix(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io;
+
+    // Null-terminate path for libc (avoid heap alloc for typical paths < 256 bytes)
+    let path_bytes = path.as_bytes();
+    let mut c_buf = [0u8; 256];
+    let c_path: *const libc::c_char = if path_bytes.len() < 256 {
+        c_buf[..path_bytes.len()].copy_from_slice(path_bytes);
+        c_buf[path_bytes.len()] = 0;
+        c_buf.as_ptr() as *const libc::c_char
+    } else {
+        // Long path: heap allocate
+        let mut v = Vec::with_capacity(path_bytes.len() + 1);
+        v.extend_from_slice(path_bytes);
+        v.push(0);
+        // Leak temporarily (will be reclaimed when Vec drops)
+        // Actually, just use std::fs::read for very long paths
+        return std::fs::read(path);
+    };
+
+    // Open with O_NOATIME (Linux only) to skip atime update
+    #[cfg(target_os = "linux")]
+    let mut fd = unsafe { libc::open(c_path, libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOATIME) };
+    #[cfg(not(target_os = "linux"))]
+    let mut fd = unsafe { libc::open(c_path, libc::O_RDONLY | libc::O_CLOEXEC) };
+
+    if fd < 0 {
+        // O_NOATIME may fail with EPERM if we don't own the file — retry without it
+        #[cfg(target_os = "linux")]
+        {
+            fd = unsafe { libc::open(c_path, libc::O_RDONLY | libc::O_CLOEXEC) };
+        }
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    // Fast path: try to read without fstat (saves ~1μs syscall for small files).
+    // Use thread-local buffer to avoid per-call allocation.
+    const FAST_BUF_SIZE: usize = 256 * 1024; // 256KB covers most audio metadata files
+    thread_local! {
+        static FAST_BUF: std::cell::UnsafeCell<Vec<u8>> = std::cell::UnsafeCell::new(vec![0u8; FAST_BUF_SIZE]);
+    }
+
+    let result = FAST_BUF.with(|cell| {
+        let buf = unsafe { &mut *cell.get() };
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, FAST_BUF_SIZE) };
+        if n < 0 {
+            unsafe { libc::close(fd); }
+            return Err(io::Error::last_os_error());
+        }
+        let n = n as usize;
+        if n < FAST_BUF_SIZE {
+            // Entire file fit in buffer — copy out and close (no fstat needed)
+            unsafe { libc::close(fd); }
+            Ok(buf[..n].to_vec())
+        } else {
+            // File is larger: fstat to get remaining size, then read rest
+            let total_size = unsafe {
+                let mut stat: libc::stat = std::mem::zeroed();
+                if libc::fstat(fd, &mut stat) != 0 {
+                    libc::close(fd);
+                    return Err(io::Error::last_os_error());
+                }
+                stat.st_size as usize
+            };
+            let mut out = Vec::with_capacity(total_size);
+            out.extend_from_slice(&buf[..n]);
+            // Read remainder
+            let remaining = total_size - n;
+            out.reserve(remaining);
+            unsafe {
+                let n2 = libc::read(fd, out.as_mut_ptr().add(n) as *mut libc::c_void, remaining);
+                libc::close(fd);
+                if n2 > 0 {
+                    out.set_len(n + n2 as usize);
+                }
+            }
+            Ok(out)
+        }
+    });
+
+    result
 }
 
 #[cfg(feature = "python")]
@@ -4233,7 +4334,7 @@ fn fast_info_mp4<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyDict>) -
 /// Selective parsing — skips tag structures entirely for maximum speed.
 #[pyfunction]
 fn _fast_info(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
-    let data = read_cached(filename)
+    let data = fast_file_read(filename)
         .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
     let dict: Bound<'_, PyDict> = unsafe {
         let ptr = pyo3::ffi::PyDict_New();
@@ -4261,11 +4362,10 @@ fn _fast_info(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
     Ok(dict.into_any().unbind())
 }
 
-/// Fast single-file read with three-tier caching:
-/// Fast single-file read with three-tier caching:
+/// Fast single-file read with two-tier caching + direct parsing:
 ///   Level 1 (warm): RESULT_CACHE → PyDict_Copy (~200ns)
 ///   Level 2 (cold): TEMPLATE_CACHE → PyDict_Copy (~200ns, template persists across clear_cache)
-///   Level 3 (first): FILE_CACHE → parse → PyDict + store template (~2-4μs)
+///   First read: std::fs::read → fast_read_*_direct → PyDict (no intermediary)
 /// clear_cache() only clears Level 1. Templates persist until file is modified.
 #[pyfunction]
 fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
@@ -4301,12 +4401,9 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
         }
     }
 
-    // Level 3: Parse from scratch (first read or after file modification)
-    let data = read_cached(filename)
+    // First read: raw libc I/O + direct parsing (no intermediary structures)
+    let data = fast_file_read(filename)
         .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
-
-    let pf = parse_and_serialize(&data, filename)
-        .ok_or_else(|| PyValueError::new_err(format!("Unable to parse: {}", filename)))?;
 
     let dict: Bound<'_, PyDict> = unsafe {
         let ptr = pyo3::ffi::PyDict_New();
@@ -4315,20 +4412,47 @@ fn _fast_read(py: Python<'_>, filename: &str) -> PyResult<Py<PyAny>> {
         }
         Bound::from_owned_ptr(py, ptr).cast_into_unchecked()
     };
-    preserialized_to_flat_dict(py, &pf, &dict)?;
 
-    // Store template (persists across clear_cache, invalidated on file modification)
+    let ext = filename.rsplit('.').next().unwrap_or("");
+    let ok = if ext.eq_ignore_ascii_case("flac") {
+        fast_read_flac_direct(py, &data, data.len(), &dict)?
+    } else if ext.eq_ignore_ascii_case("ogg") {
+        fast_read_ogg_direct(py, &data, &dict)?
+    } else if ext.eq_ignore_ascii_case("mp3") {
+        fast_read_mp3_direct(py, &data, filename, &dict)?
+    } else if ext.eq_ignore_ascii_case("m4a") || ext.eq_ignore_ascii_case("m4b")
+            || ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("m4v") {
+        fast_read_mp4_direct(py, &data, filename, &dict)?
+    } else {
+        // Unknown extension: try score-based detection
+        let mp3_score = mp3::MP3File::score(filename, &data);
+        let flac_score = flac::FLACFile::score(filename, &data);
+        let ogg_score = ogg::OggVorbisFile::score(filename, &data);
+        let mp4_score = mp4::MP4File::score(filename, &data);
+        let max_score = mp3_score.max(flac_score).max(ogg_score).max(mp4_score);
+        if max_score == 0 { false }
+        else if max_score == flac_score { fast_read_flac_direct(py, &data, data.len(), &dict)? }
+        else if max_score == ogg_score { fast_read_ogg_direct(py, &data, &dict)? }
+        else if max_score == mp4_score { fast_read_mp4_direct(py, &data, filename, &dict)? }
+        else { fast_read_mp3_direct(py, &data, filename, &dict)? }
+    };
+
+    if !ok {
+        return Err(PyValueError::new_err(format!("Unable to parse: {}", filename)));
+    }
+
+    // Populate result + template caches (skip FILE_CACHE — populated lazily by read_cached)
+    let key = filename.to_string();
+    let dict_copy = dict.clone().unbind();
     {
         let tcache = get_template_cache();
         let mut guard = tcache.write().unwrap();
-        guard.insert(filename.to_string(), dict.clone().unbind());
+        guard.insert(key.clone(), dict_copy);
     }
-
-    // Store in result cache for subsequent warm reads
     {
         let rcache = get_result_cache();
         let mut guard = rcache.write().unwrap();
-        guard.insert(filename.to_string(), dict.clone().unbind());
+        guard.insert(key, dict.clone().unbind());
     }
 
     Ok(dict.into_any().unbind())
