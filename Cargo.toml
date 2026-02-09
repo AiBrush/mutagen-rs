@@ -45,10 +45,6 @@ libc = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 lofty = "0.23"
 
-[[bench]]
-name = "parse_comparison"
-harness = false
-
 [profile.release]
 lto = "fat"
 codegen-units = 1

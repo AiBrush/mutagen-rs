@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/AiBrush/mutagen-rs)](https://github.com/AiBrush/mutagen-rs/releases)
 
-High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **7-30x faster cold reads** and **100x+ faster** cached/batch processing on all formats.
+High-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **up to 25x faster cold reads** and **100-350x faster** cached/batch processing.
 
 ## Performance
 
@@ -20,11 +20,11 @@ Cold = both file and result caches cleared. Both sides read from OS page cache.
 
 | Format | mutagen (Python) | mutagen-rs cold | Speedup |
 |--------|-----------------|-----------------|---------|
-| MP3    | 0.289 ms/file   | 0.010 ms/file   | **29x** |
-| FLAC   | 0.116 ms/file   | 0.009 ms/file   | **13x** |
-| OGG    | 0.254 ms/file   | 0.015 ms/file   | **17x** |
-| MP4    | 0.253 ms/file   | 0.011 ms/file   | **24x** |
-| Auto   | 0.340 ms/file   | 0.011 ms/file   | **31x** |
+| MP3    | 0.278 ms/file   | 0.011 ms/file   | **25x** |
+| FLAC   | 0.112 ms/file   | 0.013 ms/file   | **9x**  |
+| OGG    | 0.231 ms/file   | 0.055 ms/file   | **4x**  |
+| MP4    | 0.248 ms/file   | 0.011 ms/file   | **22x** |
+| Auto   | 0.331 ms/file   | 0.014 ms/file   | **24x** |
 
 ### Single-file with result caching (warm)
 
@@ -32,10 +32,10 @@ Warm = file data + parsed result cached in Rust; returns a shallow dict copy. Re
 
 | Format | mutagen (Python) | mutagen-rs warm | Speedup |
 |--------|-----------------|-----------------|---------|
-| MP3    | 0.289 ms/file   | 0.0008 ms/file  | **343x** |
-| FLAC   | 0.116 ms/file   | 0.0007 ms/file  | **159x** |
-| OGG    | 0.254 ms/file   | 0.0006 ms/file  | **407x** |
-| MP4    | 0.253 ms/file   | 0.0007 ms/file  | **385x** |
+| MP3    | 0.278 ms/file   | 0.0009 ms/file  | **320x** |
+| FLAC   | 0.112 ms/file   | 0.0009 ms/file  | **124x** |
+| OGG    | 0.231 ms/file   | 0.0007 ms/file  | **328x** |
+| MP4    | 0.248 ms/file   | 0.0007 ms/file  | **349x** |
 
 ### Batch (rayon parallel vs Python sequential)
 
@@ -43,11 +43,11 @@ Batch uses Rust rayon parallelism with stat-based dedup vs Python sequential. 40
 
 | Format | Files | mutagen (Python) | mutagen-rs batch | Speedup |
 |--------|-------|-----------------|------------------|---------|
-| MP3    | 760   | 0.294 ms/file   | 0.0011 ms/file   | **264x** |
-| FLAC   | 280   | 0.124 ms/file   | 0.0010 ms/file   | **120x** |
-| OGG    | 120   | 0.240 ms/file   | 0.0014 ms/file   | **169x** |
-| MP4    | 360   | 0.268 ms/file   | 0.0012 ms/file   | **227x** |
-| Auto   | 1520  | 0.333 ms/file   | 0.0013 ms/file   | **264x** |
+| MP3    | 760   | 0.294 ms/file   | 0.0015 ms/file   | **190x** |
+| FLAC   | 280   | 0.121 ms/file   | 0.0013 ms/file   | **95x**  |
+| OGG    | 120   | 0.231 ms/file   | 0.0033 ms/file   | **70x**  |
+| MP4    | 360   | 0.266 ms/file   | 0.0016 ms/file   | **164x** |
+| Auto   | 1520  | 0.336 ms/file   | 0.0016 ms/file   | **210x** |
 
 ### vs lofty-rs (Rust-to-Rust, in-memory, criterion)
 
@@ -65,8 +65,10 @@ Both parsing from `&[u8]` in memory. Uses [criterion](https://github.com/bheisle
 | MP4 (small)  | 95 ns   | 4.4 us   | **46x** |
 
 **Methodology notes:**
-- Cold/warm benchmarks run on our development hardware. Results may differ on other systems (independent testing has measured 7-15x cold speedup).
-- Batch speedup includes benefits from rayon parallelism (multi-core), not just faster parsing.
+- Cold/warm benchmarks run on our development hardware. Results may differ on other systems.
+- Cold reads include file I/O which is the dominant cost at this scale; warm/batch numbers reflect pure parsing + FFI overhead.
+- OGG cold reads are slower because the test files have multi-page comments (atypical); normal single-page OGG files are much faster.
+- Batch speedup includes benefits from rayon parallelism (multi-core) and stat-based dedup, not just faster parsing.
 - The lofty-rs comparison is lazy-parse vs full-parse, so the speedup partly reflects deferred work rather than eliminated work.
 
 ## Supported Formats
@@ -76,7 +78,7 @@ Both parsing from `&[u8]` in memory. Uses [criterion](https://github.com/bheisle
 | MP3        | Yes  | Yes   | ID3v1, ID3v2.2/2.3/2.4 |
 | FLAC       | Yes  | Yes   | Vorbis Comments         |
 | OGG Vorbis | Yes  | Yes   | Vorbis Comments         |
-| MP4/M4A    | Yes  | No    | iTunes-style ilst atoms |
+| MP4/M4A    | Yes  | Yes   | iTunes-style ilst atoms |
 
 ## Installation
 
@@ -188,8 +190,8 @@ python/
 - **Two-level caching**: File data cache (eliminates I/O) + parsed result cache (returns `PyDict_Copy` in ~300ns)
 - **Parallel batch processing**: rayon thread pool for multi-file workloads
 - **Raw CPython FFI**: Direct `PyDict_SetItem`/`PyUnicode_FromStringAndSize` calls bypass PyO3 wrapper overhead
-- **mimalloc**: Global allocator for reduced allocation overhead
 - **Fat LTO**: Whole-program link-time optimization with `codegen-units = 1`
+- **Arc-based batch dedup**: Content-fingerprint dedup avoids redundant parsing; dict template caching avoids redundant Python object creation
 - **Interned keys**: `pyo3::intern!` for info fields + thread-local cache for tag keys (ID3 frame IDs, Vorbis comment keys)
 - **SIMD search**: `memchr`/`memmem` for MP3 sync finding, Vorbis key=value splitting, and OGG page scanning
 - **O(1) batch lookup**: HashMap index for batch result access (avoids O(n) linear search)

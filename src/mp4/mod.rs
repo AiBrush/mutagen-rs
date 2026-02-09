@@ -207,6 +207,44 @@ impl MP4File {
     }
 }
 
+/// Read a variable-length descriptor size (ISO 14496-1).
+#[inline]
+fn read_descriptor_length(data: &[u8]) -> (usize, usize) {
+    let mut len = 0usize;
+    let mut bytes_read = 0;
+    for i in 0..4.min(data.len()) {
+        let b = data[i];
+        bytes_read += 1;
+        len = (len << 7) | (b & 0x7F) as usize;
+        if b & 0x80 == 0 { break; }
+    }
+    (len, bytes_read)
+}
+
+/// Parse avgBitrate from an esds atom's data (after the atom header).
+/// Returns the average bitrate in bits/second, or 0 if not found.
+pub fn parse_esds_bitrate(esds_data: &[u8]) -> u32 {
+    if esds_data.len() < 5 { return 0; }
+    let body = &esds_data[4..]; // skip version(4)
+    let mut pos = 0;
+    // ES_Descriptor tag = 0x03
+    if pos >= body.len() || body[pos] != 0x03 { return 0; }
+    pos += 1;
+    let (_, bytes_read) = read_descriptor_length(&body[pos..]);
+    pos += bytes_read;
+    if pos + 3 > body.len() { return 0; }
+    pos += 3; // ES_ID(2) + flags(1)
+    // DecoderConfigDescriptor tag = 0x04
+    if pos >= body.len() || body[pos] != 0x04 { return 0; }
+    pos += 1;
+    let (_, dc_bytes) = read_descriptor_length(&body[pos..]);
+    pos += dc_bytes;
+    // objectTypeIndication(1) + streamType+bufferSizeDB(4) + maxBitrate(4) + avgBitrate(4)
+    if pos + 13 > body.len() { return 0; }
+    pos += 9; // skip to avgBitrate
+    u32::from_be_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]])
+}
+
 /// Parse MP4 audio info using iterators (no intermediate Vec allocations).
 fn parse_mp4_info_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Result<MP4Info> {
     let mut duration = 0u64;
@@ -285,6 +323,7 @@ fn parse_mp4_info_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Resul
         if stsd_data.len() >= 16 {
             let entry_data = &stsd_data[8..];
             if entry_data.len() >= 28 + 8 {
+                let entry_size = u32::from_be_bytes([entry_data[0], entry_data[1], entry_data[2], entry_data[3]]) as usize;
                 let fmt = &entry_data[4..8];
                 codec = String::from_utf8_lossy(fmt).to_string();
 
@@ -296,11 +335,27 @@ fn parse_mp4_info_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Resul
                         sample_rate = u16::from_be_bytes([audio_entry[24], audio_entry[25]]) as u32;
                     }
                 }
+                // Look for esds sub-atom after the 28-byte audio entry header
+                if entry_size > 36 && audio_entry.len() >= entry_size - 8 {
+                    let sub_start = stsd.data_offset + 8 + 8 + 28;
+                    let sub_end = stsd.data_offset + 8 + entry_size;
+                    if sub_end <= data.len() {
+                        for sub in AtomIter::new(data, sub_start, sub_end) {
+                            if sub.name == *b"esds" {
+                                let esds = &data[sub.data_offset..sub.data_offset + sub.data_size];
+                                let avg = parse_esds_bitrate(esds);
+                                if avg > 0 { bitrate = avg; }
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    if length > 0.0 {
+    // Fallback: estimate from file size if esds didn't provide bitrate
+    if bitrate == 0 && length > 0.0 {
         bitrate = (data.len() as f64 * 8.0 / length) as u32;
     }
 
