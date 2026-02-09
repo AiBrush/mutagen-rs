@@ -1,8 +1,8 @@
 """Performance benchmark: mutagen_rs vs original mutagen.
 
 Measures three scenarios:
-1. Cold read:  Rust file cache cleared each iteration (both sides read from disk via OS page cache)
-2. Warm read:  Rust file cache warm (Rust skips I/O, Python still reads from disk)
+1. Cold read:  Rust result cache cleared each iteration (parsed dict regenerated from template)
+2. Warm read:  Rust result cache warm (returns shallow dict copy, no parsing)
 3. Batch:      Rust rayon parallel vs Python sequential (cold, unique files)
 
 All scenarios: both sides fully parse tags + info, then iterate all keys/values.
@@ -140,8 +140,8 @@ def main():
     print()
     print("Benchmark methodology:")
     print("  Both sides: full parse (tags + info) + iterate all keys/values")
-    print("  Cold:  Rust file cache cleared (both read from disk via OS page cache)")
-    print("  Warm:  Rust file cache warm (Rust: cache hit, Python: disk read)")
+    print("  Cold:  Rust result cache cleared (dict regenerated from cached template)")
+    print("  Warm:  Rust result cache warm (returns shallow dict copy, no parsing)")
     print("  Batch: Rust rayon parallel vs Python sequential (cold, unique files)")
     print()
 
