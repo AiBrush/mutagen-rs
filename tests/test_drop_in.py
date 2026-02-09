@@ -343,3 +343,313 @@ class TestMutagenComparison:
         r = mutagen_rs.File(path, easy=True)
         assert type(m).__name__ == type(r).__name__, \
             f"Type mismatch: mutagen={type(m).__name__} vs rs={type(r).__name__}"
+
+
+# ──────────────────────────────────────────────────────────────
+# Frame class construction and attributes
+# ──────────────────────────────────────────────────────────────
+
+class TestFrameClasses:
+    """Frame classes should be constructable like mutagen frames."""
+
+    def test_text_frame_construction(self):
+        from mutagen_rs.id3 import TIT2, Encoding
+        t = TIT2(encoding=Encoding.UTF8, text=['Test'])
+        assert str(t) == 'Test'
+        assert t.text == ['Test']
+        assert t.encoding == Encoding.UTF8
+
+    def test_text_frame_multi_value(self):
+        from mutagen_rs.id3 import TPE1
+        t = TPE1(encoding=3, text=['Artist1', 'Artist2'])
+        assert str(t) == 'Artist1\x00Artist2'
+        assert len(t) == 2
+        assert list(t) == ['Artist1', 'Artist2']
+
+    def test_txxx_hashkey(self):
+        from mutagen_rs.id3 import TXXX
+        t = TXXX(encoding=3, desc='replaygain', text=['0.5'])
+        assert t.HashKey == 'TXXX:replaygain'
+        assert t.FrameID == 'TXXX'
+
+    def test_apic_construction(self):
+        from mutagen_rs.id3 import APIC, PictureType
+        a = APIC(encoding=0, mime='image/jpeg', type=PictureType.COVER_FRONT,
+                 desc='Cover', data=b'\xff\xd8')
+        assert a.mime == 'image/jpeg'
+        assert a.type == PictureType.COVER_FRONT
+        assert a.data == b'\xff\xd8'
+        assert a.HashKey == 'APIC:Cover'
+
+    def test_comm_construction(self):
+        from mutagen_rs.id3 import COMM
+        c = COMM(encoding=3, lang='eng', desc='', text=['A comment'])
+        assert str(c) == 'A comment'
+        assert c.HashKey == 'COMM::eng'
+
+    def test_uslt_construction(self):
+        from mutagen_rs.id3 import USLT
+        u = USLT(encoding=3, lang='eng', desc='', text='Lyrics here')
+        assert str(u) == 'Lyrics here'
+        assert u.HashKey == 'USLT::eng'
+
+    def test_popm_construction(self):
+        from mutagen_rs.id3 import POPM
+        p = POPM(email='user@test.com', rating=128, count=10)
+        assert p.email == 'user@test.com'
+        assert +p == 128
+        assert p.HashKey == 'POPM:user@test.com'
+
+    def test_numeric_text_frame(self):
+        from mutagen_rs.id3 import TRCK
+        t = TRCK(encoding=3, text=['3/12'])
+        assert +t == 3
+
+    def test_timestamp_frame(self):
+        from mutagen_rs.id3 import TDRC, ID3TimeStamp
+        t = TDRC(encoding=3, text=['2024-01-15'])
+        assert isinstance(t.text[0], ID3TimeStamp)
+        assert t.text[0].year == 2024
+
+    def test_tcon_genres(self):
+        from mutagen_rs.id3 import TCON
+        t = TCON(encoding=3, text=['Rock', 'Pop'])
+        assert t.genres == ['Rock', 'Pop']
+
+    def test_url_frame(self):
+        from mutagen_rs.id3 import WOAR
+        w = WOAR(url='https://example.com')
+        assert str(w) == 'https://example.com'
+
+    def test_wxxx_hashkey(self):
+        from mutagen_rs.id3 import WXXX
+        w = WXXX(encoding=3, desc='homepage', url='https://example.com')
+        assert w.HashKey == 'WXXX:homepage'
+
+    def test_frame_append_extend(self):
+        from mutagen_rs.id3 import TPE1
+        t = TPE1(encoding=3, text=['Artist1'])
+        t.append('Artist2')
+        assert len(t) == 2
+        t.extend(['Artist3', 'Artist4'])
+        assert len(t) == 4
+
+    def test_binary_frame(self):
+        from mutagen_rs.id3 import MCDI
+        m = MCDI(data=b'\x01\x02\x03')
+        assert m.data == b'\x01\x02\x03'
+
+
+class TestFrameDicts:
+    """Frames and Frames_2_2 dicts should contain all frame classes."""
+
+    def test_frames_count(self):
+        from mutagen_rs.id3 import Frames
+        assert len(Frames) >= 100
+
+    def test_frames_2_2_count(self):
+        from mutagen_rs.id3 import Frames_2_2
+        assert len(Frames_2_2) >= 60
+
+    def test_frames_contains_common(self):
+        from mutagen_rs.id3 import Frames
+        for name in ['TIT2', 'TPE1', 'TALB', 'TXXX', 'APIC', 'COMM', 'USLT', 'POPM']:
+            assert name in Frames, f'{name} missing from Frames'
+
+    def test_frames_2_2_inherits(self):
+        from mutagen_rs.id3 import Frames, Frames_2_2
+        # v2.2 TT2 should be subclass of v2.4 TIT2
+        assert issubclass(Frames_2_2['TT2'], Frames['TIT2'])
+
+
+class TestEnumsAndTypes:
+    """All enums and support types should work."""
+
+    def test_picture_type_values(self):
+        assert int(mutagen_rs.PictureType.OTHER) == 0
+        assert int(mutagen_rs.PictureType.COVER_FRONT) == 3
+        assert int(mutagen_rs.PictureType.COVER_BACK) == 4
+
+    def test_bitrate_mode_values(self):
+        assert int(mutagen_rs.BitrateMode.UNKNOWN) == 0
+        assert int(mutagen_rs.BitrateMode.CBR) == 1
+        assert int(mutagen_rs.BitrateMode.VBR) == 2
+
+    def test_id3_timestamp(self):
+        ts = mutagen_rs.ID3TimeStamp('2024-03-15T10:30:00')
+        assert ts.year == 2024
+        assert ts.month == 3
+        assert ts.day == 15
+        assert str(ts) == '2024-03-15T10:30:00'
+
+    def test_id3v1_save_options(self):
+        assert int(mutagen_rs.ID3v1SaveOptions.REMOVE) == 0
+        assert int(mutagen_rs.ID3v1SaveOptions.UPDATE) == 1
+        assert int(mutagen_rs.ID3v1SaveOptions.CREATE) == 2
+
+    def test_mp3_mode_constants(self):
+        assert mutagen_rs.STEREO == 0
+        assert mutagen_rs.MONO == 3
+
+
+# ──────────────────────────────────────────────────────────────
+# ID3 container methods
+# ──────────────────────────────────────────────────────────────
+
+class TestID3ContainerMethods:
+    """getall/add/delall/setall should work on opened files."""
+
+    def test_getall(self):
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        result = f.getall('TIT2')
+        assert len(result) >= 1
+
+    def test_getall_empty(self):
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        result = f.getall('NONEXISTENT')
+        assert result == []
+
+    def test_add_frame(self):
+        from mutagen_rs.id3 import TIT2
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        frame = TIT2(encoding=3, text=['Added Title'])
+        f.add(frame)
+        assert 'TIT2' in f.keys()
+        assert f['TIT2'] is frame
+
+    def test_delall(self):
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        assert 'TIT2' in f.keys()
+        f.delall('TIT2')
+        assert 'TIT2' not in f.keys()
+
+    def test_setall(self):
+        from mutagen_rs.id3 import TXXX
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        frames = [TXXX(encoding=3, desc='key1', text=['val1']),
+                  TXXX(encoding=3, desc='key2', text=['val2'])]
+        f.setall('TXXX', frames)
+        assert 'TXXX:key1' in f.keys()
+        assert 'TXXX:key2' in f.keys()
+
+    def test_add_invalid_raises(self):
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        with pytest.raises(TypeError):
+            f.add("not a frame")
+
+
+# ──────────────────────────────────────────────────────────────
+# FLAC Picture support
+# ──────────────────────────────────────────────────────────────
+
+class TestFLACPicture:
+    """FLAC should support add_picture/clear_pictures."""
+
+    def test_picture_class(self):
+        from mutagen_rs.flac import Picture
+        p = Picture()
+        assert p.type == 3
+        assert p.data == b''
+        p.mime = 'image/png'
+        p.data = b'fakedata'
+        assert p.mime == 'image/png'
+
+    def test_add_picture(self):
+        from mutagen_rs import Picture
+        f = mutagen_rs.FLAC(get_test_file("silence-44-s.flac"))
+        initial = len(f.pictures)
+        p = Picture()
+        p.mime = 'image/jpeg'
+        p.data = b'\xff\xd8'
+        f.add_picture(p)
+        assert len(f.pictures) == initial + 1
+
+    def test_clear_pictures(self):
+        from mutagen_rs import Picture
+        f = mutagen_rs.FLAC(get_test_file("silence-44-s.flac"))
+        p = Picture()
+        p.data = b'test'
+        f.add_picture(p)
+        f.clear_pictures()
+        assert len(f.pictures) == 0
+
+
+# ──────────────────────────────────────────────────────────────
+# MP4Cover / MP4FreeForm
+# ──────────────────────────────────────────────────────────────
+
+class TestMP4Types:
+    """MP4Cover and MP4FreeForm should work like mutagen."""
+
+    def test_mp4cover_construction(self):
+        from mutagen_rs.mp4 import MP4Cover, AtomDataType
+        c = MP4Cover(b'\x89PNG', imageformat=AtomDataType.PNG)
+        assert bytes(c) == b'\x89PNG'
+        assert c.imageformat == AtomDataType.PNG
+
+    def test_mp4cover_default_jpeg(self):
+        from mutagen_rs.mp4 import MP4Cover, AtomDataType
+        c = MP4Cover(b'\xff\xd8')
+        assert c.imageformat == AtomDataType.JPEG
+
+    def test_mp4cover_format_constants(self):
+        from mutagen_rs.mp4 import MP4Cover
+        assert int(MP4Cover.FORMAT_JPEG) == 13
+        assert int(MP4Cover.FORMAT_PNG) == 14
+
+    def test_mp4freeform_construction(self):
+        from mutagen_rs.mp4 import MP4FreeForm, AtomDataType
+        f = MP4FreeForm(b'hello', dataformat=AtomDataType.UTF8)
+        assert bytes(f) == b'hello'
+        assert f.dataformat == AtomDataType.UTF8
+
+    def test_atom_data_type(self):
+        from mutagen_rs.mp4 import AtomDataType
+        assert int(AtomDataType.JPEG) == 13
+        assert int(AtomDataType.PNG) == 14
+        assert int(AtomDataType.UTF8) == 1
+        assert int(AtomDataType.INTEGER) == 21
+
+
+# ──────────────────────────────────────────────────────────────
+# MIME property
+# ──────────────────────────────────────────────────────────────
+
+class TestMimeProperty:
+    """Files should have a mime property."""
+
+    def test_mp3_mime(self):
+        f = mutagen_rs.MP3(get_test_file("silence-44-s.mp3"))
+        assert 'audio/mpeg' in f.mime
+
+    def test_flac_mime(self):
+        f = mutagen_rs.FLAC(get_test_file("silence-44-s.flac"))
+        assert 'audio/flac' in f.mime
+
+    def test_ogg_mime(self):
+        f = mutagen_rs.OggVorbis(get_test_file("empty.ogg"))
+        assert 'audio/ogg' in f.mime
+
+    def test_mp4_mime(self):
+        f = mutagen_rs.MP4(get_test_file("has-tags.m4a"))
+        assert 'audio/mp4' in f.mime
+
+
+# ──────────────────────────────────────────────────────────────
+# Cross-comparison: frame imports match mutagen
+# ──────────────────────────────────────────────────────────────
+
+class TestFrameImportCompat:
+    """Frame classes should be importable from same paths as mutagen."""
+
+    def test_id3_frame_import(self):
+        """Common import patterns from mutagen.id3 should work."""
+        from mutagen_rs.id3 import TIT2, TPE1, TALB, TRCK, TCON, TXXX
+        from mutagen_rs.id3 import APIC, COMM, USLT, POPM
+        from mutagen_rs.id3 import Encoding, PictureType
+
+    def test_mp4_type_import(self):
+        from mutagen_rs.mp4 import MP4Cover, MP4FreeForm, AtomDataType
+
+    def test_flac_picture_import(self):
+        from mutagen_rs.flac import Picture, FLAC

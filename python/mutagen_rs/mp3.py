@@ -9,6 +9,14 @@ from . import (
     MP3Error,
     HeaderNotFoundError,
     MutagenError,
+    BitrateMode,
+    STEREO,
+    JOINTSTEREO,
+    DUALCHANNEL,
+    MONO,
 )
 
-__all__ = ['MP3', 'EasyMP3', 'MPEGInfo', 'MP3Error', 'HeaderNotFoundError']
+__all__ = [
+    'MP3', 'EasyMP3', 'MPEGInfo', 'MP3Error', 'HeaderNotFoundError',
+    'MutagenError', 'BitrateMode', 'STEREO', 'JOINTSTEREO', 'DUALCHANNEL', 'MONO',
+]

@@ -264,6 +264,75 @@ class _CachedFile(dict):
         """Return list of tag keys."""
         return self._tag_keys
 
+    # ── ID3 container methods (matching mutagen.id3.ID3Tags) ──
+
+    def getall(self, key):
+        """Return all frames matching key (supports 'TXXX:desc' colon matching)."""
+        if ':' in key:
+            # Exact HashKey match
+            v = dict.get(self, key)
+            return [v] if v is not None else []
+        # Match all keys starting with this prefix
+        result = []
+        for k in self._tag_keys:
+            if k == key or k.startswith(key + ':'):
+                result.append(dict.__getitem__(self, k))
+        return result
+
+    def delall(self, key):
+        """Delete all frames matching key."""
+        to_del = [k for k in self._tag_keys if k == key or k.startswith(key + ':')]
+        for k in to_del:
+            dict.__delitem__(self, k)
+        self._tag_keys = [k for k in self._tag_keys if k not in to_del]
+
+    def setall(self, key, values):
+        """Replace all frames of key type with values."""
+        self.delall(key)
+        for v in values:
+            if hasattr(v, 'HashKey'):
+                hk = v.HashKey
+                dict.__setitem__(self, hk, v)
+                self._tag_keys.append(hk)
+            else:
+                dict.__setitem__(self, key, v)
+                if key not in self._tag_keys:
+                    self._tag_keys.append(key)
+
+    def add(self, frame):
+        """Add a Frame instance by its HashKey."""
+        if hasattr(frame, 'HashKey'):
+            hk = frame.HashKey
+            dict.__setitem__(self, hk, frame)
+            if hk not in self._tag_keys:
+                self._tag_keys.append(hk)
+        else:
+            raise TypeError(f'Expected a Frame, got {type(frame).__name__}')
+
+    # ── FLAC picture methods ──
+
+    def add_picture(self, picture):
+        """Add a Picture to this file's metadata."""
+        self._pictures.append(picture)
+
+    def clear_pictures(self):
+        """Remove all pictures from this file's metadata."""
+        self._pictures.clear()
+
+    # Alias matching mutagen.flac.FLAC.add_vorbiscomment
+    add_vorbiscomment = add_tags
+
+    @property
+    def mime(self):
+        """MIME types for this format."""
+        _mimes = {
+            'mp3': ['audio/mpeg', 'audio/mpg', 'audio/x-mpeg'],
+            'flac': ['audio/flac', 'audio/x-flac'],
+            'ogg': ['audio/ogg', 'audio/vorbis', 'application/ogg'],
+            'mp4': ['audio/mp4', 'audio/x-m4a', 'audio/mpeg4', 'audio/aac'],
+        }
+        return _mimes.get(self._format, [])
+
     def __repr__(self):
         if self._native is not None:
             return self._native.__repr__()
@@ -567,8 +636,7 @@ class EasyMP3(_MP3File):
     __slots__ = ('_easy_tags',)
 
     def __new__(cls, filename):
-        obj = MP3(filename)
-        # Create an EasyMP3 wrapper around the existing MP3 result
+        MP3(filename)  # ensure file is cached
         easy = _MP3File.__new__(cls)
         dict.__init__(easy)
         return easy
@@ -611,7 +679,7 @@ class EasyMP4(_MP4File):
     __slots__ = ('_easy_tags',)
 
     def __new__(cls, filename):
-        obj = MP4(filename)
+        MP4(filename)  # ensure file is cached
         easy = _MP4File.__new__(cls)
         dict.__init__(easy)
         return easy
@@ -659,14 +727,6 @@ _EASY_CONSTRUCTORS = {
     'ogg': OggVorbis,
     'mp4': EasyMP4,
 }
-
-_NORMAL_CONSTRUCTORS = {
-    'mp3': MP3,
-    'flac': FLAC,
-    'ogg': OggVorbis,
-    'mp4': MP4,
-}
-
 
 def File(filename, easy=False):
     """Auto-detect format and open an audio file.
@@ -754,3 +814,41 @@ def clear_all_caches():
 FileType = _CachedFile
 Tags = dict
 Metadata = dict
+
+# ──────────────────────────────────────────────────────────────
+# Re-export frame classes, enums, and support types
+# ──────────────────────────────────────────────────────────────
+
+from ._id3frames import (  # noqa: E402
+    # Enums
+    PictureType, BitrateMode, CTOCFlags, ID3v1SaveOptions, ID3TimeStamp,
+    # MP3 mode constants
+    STEREO, JOINTSTEREO, DUALCHANNEL, MONO,
+    # Frame base classes
+    Frame, TextFrame, NumericTextFrame, NumericPartTextFrame,
+    TimeStampTextFrame, UrlFrame, UrlFrameU, PairedTextFrame, BinaryFrame,
+    # All v2.3/v2.4 frame classes
+    TALB, TBPM, TCOM, TCON, TCOP, TCMP, TDAT, TDEN, TDES, TKWD, TCAT,
+    MVNM, MVIN, GRP1, TDOR, TDLY, TDRC, TDRL, TDTG, TENC, TEXT, TFLT,
+    TGID, TIME, TIT1, TIT2, TIT3, TKEY, TLAN, TLEN, TMED, TMOO, TOAL,
+    TOFN, TOLY, TOPE, TORY, TOWN, TPE1, TPE2, TPE3, TPE4, TPOS, TPRO,
+    TPUB, TRCK, TRDA, TRSN, TRSO, TSIZ, TSO2, TSOA, TSOC, TSOP, TSOT,
+    TSRC, TSSE, TSST, TYER, TXXX,
+    WCOM, WCOP, WFED, WOAF, WOAR, WOAS, WORS, WPAY, WPUB, WXXX,
+    TIPL, TMCL, IPLS,
+    APIC, USLT, SYLT, COMM, RVA2, EQU2, RVAD, RVRB, POPM, PCNT, PCST,
+    GEOB, RBUF, AENC, LINK, POSS, UFID, USER, OWNE, COMR, ENCR, GRID,
+    PRIV, SIGN, SEEK, ASPI, MCDI, ETCO, MLLT, SYTC, CRM, CHAP, CTOC,
+    # v2.2 aliases
+    UFI, TT1, TT2, TT3, TP1, TP2, TP3, TP4, TCM, TXT, TLA, TCO, TAL,
+    TPA, TRK, TRC, TYE, TDA, TIM, TRD, TMT, TFT, TBP, TCP, TCR, TPB,
+    TEN, TST, TSA, TS2, TSP, TSC, TSS, TOF, TLE, TSI, TDY, TKE, TOT,
+    TOA, TOL, TOR, TXX, WAF, WAR, WAS, WCM, WCP, WPB, WXX, IPL, MCI,
+    ETC, MLL, STC, ULT, SLT, COM, RVA, REV, PIC, GEO, CNT, POP, BUF,
+    CRA, LNK, MVN, MVI, GP1,
+    # Frame dicts
+    Frames, Frames_2_2,
+)
+
+from ._mp4types import MP4Cover, MP4FreeForm, AtomDataType  # noqa: E402
+from ._flactypes import Picture  # noqa: E402

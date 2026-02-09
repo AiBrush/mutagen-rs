@@ -4,10 +4,16 @@ Drop-in replacement for mutagen.mp4.
 """
 from . import (
     MP4,
+    EasyMP4,
     MP4Info,
     MP4Tags,
     MP4Error,
-    MutagenError,
+    MP4Cover,
+    MP4FreeForm,
+    AtomDataType,
 )
 
-__all__ = ['MP4', 'MP4Info', 'MP4Tags', 'MP4Error']
+__all__ = [
+    'MP4', 'EasyMP4', 'MP4Info', 'MP4Tags', 'MP4Error',
+    'MP4Cover', 'MP4FreeForm', 'AtomDataType',
+]

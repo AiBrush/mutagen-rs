@@ -7,7 +7,7 @@ from . import (
     StreamInfo,
     FLACError,
     FLACNoHeaderError,
-    MutagenError,
+    Picture,
 )
 
-__all__ = ['FLAC', 'StreamInfo', 'FLACError', 'FLACNoHeaderError']
+__all__ = ['FLAC', 'StreamInfo', 'FLACError', 'FLACNoHeaderError', 'Picture']
