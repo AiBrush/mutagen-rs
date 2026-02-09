@@ -218,7 +218,28 @@ fn ogg_first_packet(data: &[u8], offset: usize) -> Option<&[u8]> {
 /// Assemble the first packet from an OGG page, handling multi-page packets.
 /// Returns the complete packet data across all continuation pages.
 pub fn ogg_assemble_first_packet(data: &[u8], offset: usize) -> Option<Vec<u8>> {
-    let mut result = Vec::new();
+    // Pre-scan to compute total size for single allocation
+    let mut total_size = 0usize;
+    let mut scan_offset = offset;
+    loop {
+        if scan_offset + 27 > data.len() { break; }
+        let d = &data[scan_offset..];
+        if &d[0..4] != b"OggS" { break; }
+        let num_seg = d[26] as usize;
+        let header_size = 27 + num_seg;
+        if scan_offset + header_size > data.len() { break; }
+        let mut page_done = false;
+        for &seg in &d[27..27 + num_seg] {
+            total_size += seg as usize;
+            if seg < 255 { page_done = true; break; }
+        }
+        if page_done { break; }
+        let total_data_size: usize = d[27..27 + num_seg].iter().map(|&s| s as usize).sum();
+        scan_offset += header_size + total_data_size;
+    }
+    if total_size == 0 { return None; }
+
+    let mut result = Vec::with_capacity(total_size);
     let mut page_offset = offset;
 
     loop {
@@ -248,7 +269,6 @@ pub fn ogg_assemble_first_packet(data: &[u8], offset: usize) -> Option<Vec<u8>> 
 
         if packet_complete { break; }
 
-        // Advance to next page (packet continues)
         let total_data_size: usize = d[27..27 + num_seg].iter().map(|&s| s as usize).sum();
         page_offset += header_size + total_data_size;
     }
