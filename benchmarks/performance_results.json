@@ -1,72 +1,72 @@
 {
   "mp3": {
     "files": 19,
-    "original_ms_per_file": 0.2797371577655308,
-    "rust_cold_ms_per_file": 0.0010365260287040943,
-    "rust_warm_ms_per_file": 0.000899315254125548,
-    "speedup_cold": 269.8795302953166,
-    "speedup_warm": 311.05572432164973
+    "original_ms_per_file": 0.3484227881448246,
+    "rust_cold_ms_per_file": 0.00132879052360199,
+    "rust_warm_ms_per_file": 0.001127367508352587,
+    "speedup_cold": 262.2104703157764,
+    "speedup_warm": 309.0587457624816
   },
   "flac": {
     "files": 7,
-    "original_ms_per_file": 0.11663771458967988,
-    "rust_cold_ms_per_file": 0.00105557098452534,
-    "rust_warm_ms_per_file": 0.0009202859863372785,
-    "speedup_cold": 110.49727237636085,
-    "speedup_warm": 126.74072660162506
+    "original_ms_per_file": 0.13490214561378316,
+    "rust_cold_ms_per_file": 0.001315285252141101,
+    "rust_warm_ms_per_file": 0.0011268587383840764,
+    "speedup_cold": 102.5649344080923,
+    "speedup_warm": 119.71522340700291
   },
   "ogg": {
     "files": 3,
-    "original_ms_per_file": 0.22149433304245272,
-    "rust_cold_ms_per_file": 0.0008426674564058582,
-    "rust_warm_ms_per_file": 0.0007026683306321502,
-    "speedup_cold": 262.8490412898695,
-    "speedup_warm": 315.2188925935897
+    "original_ms_per_file": 0.3180820009826372,
+    "rust_cold_ms_per_file": 0.001101997137690584,
+    "rust_warm_ms_per_file": 0.0008923331430802742,
+    "speedup_cold": 288.641403959751,
+    "speedup_warm": 356.4610408671356
   },
   "mp4": {
     "files": 9,
-    "original_ms_per_file": 0.26763722255256855,
-    "rust_cold_ms_per_file": 0.0008343340596184134,
-    "rust_warm_ms_per_file": 0.0006917770305234524,
-    "speedup_cold": 320.77945214770887,
-    "speedup_warm": 386.8836499963772
+    "original_ms_per_file": 0.301625890036424,
+    "rust_cold_ms_per_file": 0.0010538885059456031,
+    "rust_warm_ms_per_file": 0.0008714462940891584,
+    "speedup_cold": 286.20284625439547,
+    "speedup_warm": 346.1210313042704
   },
   "auto_detect": {
     "files": 38,
-    "original_ms_per_file": 0.3364672631601264,
-    "rust_cold_ms_per_file": 0.0010816051814656117,
-    "rust_warm_ms_per_file": 0.0010051053801649495,
-    "speedup_cold": 311.08140837879665,
-    "speedup_warm": 334.75819530973774
+    "original_ms_per_file": 0.42323202605506305,
+    "rust_cold_ms_per_file": 0.0012563158586425215,
+    "rust_warm_ms_per_file": 0.0010550789547299868,
+    "speedup_cold": 336.8834542233472,
+    "speedup_warm": 401.13777661632497
   },
   "batch_mp3": {
     "files": 760,
-    "original_ms_per_file": 0.3120504828984849,
-    "rust_batch_ms_per_file": 0.0016212512970301567,
-    "speedup": 192.47508604625682
+    "original_ms_per_file": 0.37830174210524237,
+    "rust_batch_ms_per_file": 0.0017149092041348157,
+    "speedup": 220.5957850089786
   },
   "batch_flac": {
     "files": 280,
-    "original_ms_per_file": 0.12759192146144677,
-    "rust_batch_ms_per_file": 0.001599660754436627,
-    "speedup": 79.76186269968373
+    "original_ms_per_file": 0.14706090005347505,
+    "rust_batch_ms_per_file": 0.002099107119387814,
+    "speedup": 70.05878770796798
   },
   "batch_ogg": {
     "files": 120,
-    "original_ms_per_file": 0.3080263083878284,
-    "rust_batch_ms_per_file": 0.003814324979127074,
-    "speedup": 80.75512969488027
+    "original_ms_per_file": 0.19638611677995263,
+    "rust_batch_ms_per_file": 0.0023468916576045253,
+    "speedup": 83.6792427735689
   },
   "batch_mp4": {
     "files": 360,
-    "original_ms_per_file": 0.2960501222130713,
-    "rust_batch_ms_per_file": 0.0015264166399396749,
-    "speedup": 193.95105796591122
+    "original_ms_per_file": 0.26606657500249437,
+    "rust_batch_ms_per_file": 0.001375163830946096,
+    "speedup": 193.47991054959886
   },
   "batch_auto_detect": {
     "files": 1520,
-    "original_ms_per_file": 0.3860313289470995,
-    "rust_batch_ms_per_file": 0.0017166296043126892,
-    "speedup": 224.87747384600198
+    "original_ms_per_file": 0.3372468625074314,
+    "rust_batch_ms_per_file": 0.0016912282980659878,
+    "speedup": 199.40942502741447
   }
 }
