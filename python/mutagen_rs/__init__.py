@@ -11,6 +11,10 @@ try:
 except Exception:
     __version__ = "0.0.0"
 
+# mutagen-compatible version exports
+version = tuple(int(x) for x in __version__.split('.')[:3])
+version_string = __version__
+
 from .mutagen_rs import (
     # File handler types (wrapped by factory functions below)
     MP3 as _RustMP3,
@@ -70,25 +74,76 @@ _cache = {}
 _last_batch = [None, None]
 
 
-class _ID3Value(list):
-    """List subclass for ID3 tag values that mimics mutagen Frame str() behavior.
+# ──────────────────────────────────────────────────────────────
+# Encoding enum (matches mutagen.id3._specs.Encoding)
+# ──────────────────────────────────────────────────────────────
 
-    In mutagen, str(tags['TIT2']) returns the text value joined by '/'.
-    Plain Python lists return "['text']" which breaks drop-in compatibility.
-    This class ensures str() returns the text directly, like mutagen does.
+class Encoding(int):
+    """ID3 text encoding, compatible with mutagen.id3.Encoding."""
+    _name = ''
+    def __new__(cls, val, name):
+        obj = super().__new__(cls, val)
+        obj._name = name
+        return obj
+    def __repr__(self):
+        return f'<Encoding.{self._name}: {int(self)}>'
+    def __str__(self):
+        return f'Encoding.{self._name}'
+
+Encoding.LATIN1 = Encoding(0, 'LATIN1')
+Encoding.UTF16 = Encoding(1, 'UTF16')
+Encoding.UTF16BE = Encoding(2, 'UTF16BE')
+Encoding.UTF8 = Encoding(3, 'UTF8')
+
+
+# ──────────────────────────────────────────────────────────────
+# _ID3Value: mimics mutagen TextFrame behavior
+# ──────────────────────────────────────────────────────────────
+
+class _ID3Value(list):
+    """List subclass for ID3 tag values that mimics mutagen Frame behavior.
+
+    In mutagen, str(tags['TIT2']) returns text joined by '\\x00' (TextFrame.__str__).
+    Also provides .text (returns self, since it's already a list like frame.text)
+    and .encoding (defaults to Encoding.UTF8).
     """
-    __slots__ = ()
+    __slots__ = ('encoding',)
+
+    def __init__(self, *args, encoding=None):
+        super().__init__(*args)
+        self.encoding = encoding if encoding is not None else Encoding.UTF8
 
     def __str__(self):
-        return '/'.join(str(x) for x in self)
+        return '\u0000'.join(str(x) for x in self)
 
     def __repr__(self):
         if len(self) == 1:
             return repr(self[0])
         return list.__repr__(self)
 
+    def _pprint(self):
+        return ' / '.join(str(x) for x in self)
 
-# Format name mapping for _CachedFile type representation
+    @property
+    def text(self):
+        return self
+
+
+# ──────────────────────────────────────────────────────────────
+# PaddingInfo (mutagen compatibility)
+# ──────────────────────────────────────────────────────────────
+
+class PaddingInfo:
+    """Padding info for tag writing (mutagen compatibility)."""
+    def __init__(self, padding=-1, size=0):
+        self.padding = padding
+        self.size = size
+
+
+# ──────────────────────────────────────────────────────────────
+# Format name mapping and subclass creation
+# ──────────────────────────────────────────────────────────────
+
 _FORMAT_NAMES = {'mp3': 'MP3', 'flac': 'FLAC', 'ogg': 'OggVorbis', 'mp4': 'MP4'}
 
 
@@ -216,6 +271,34 @@ class _CachedFile(dict):
         return f"{name}({self.filename!r})"
 
 
+# Format-specific subclasses so isinstance() and type().__name__ work
+class _MP3File(_CachedFile):
+    __slots__ = ()
+class _FLACFile(_CachedFile):
+    __slots__ = ()
+class _OggVorbisFile(_CachedFile):
+    __slots__ = ()
+class _MP4File(_CachedFile):
+    __slots__ = ()
+
+# Give them proper names for type().__name__
+_MP3File.__name__ = 'MP3'
+_MP3File.__qualname__ = 'MP3'
+_FLACFile.__name__ = 'FLAC'
+_FLACFile.__qualname__ = 'FLAC'
+_OggVorbisFile.__name__ = 'OggVorbis'
+_OggVorbisFile.__qualname__ = 'OggVorbis'
+_MP4File.__name__ = 'MP4'
+_MP4File.__qualname__ = 'MP4'
+
+_FORMAT_CLASSES = {
+    'mp3': _MP3File,
+    'flac': _FLACFile,
+    'ogg': _OggVorbisFile,
+    'mp4': _MP4File,
+}
+
+
 def _make_cached(native, filename):
     """Wrap a native file object in a _CachedFile dict subclass."""
     w = _CachedFile()
@@ -236,13 +319,15 @@ def _make_cached(native, filename):
 
 
 def _make_cached_fast(d, filename):
-    """Build a _CachedFile from a _fast_read dict (single PyO3 call)."""
-    w = _CachedFile()
+    """Build a format-specific _CachedFile from a _fast_read dict."""
+    fmt = d.get('_format', '')
+    cls = _FORMAT_CLASSES.get(fmt, _CachedFile)
+    w = cls.__new__(cls)
+    dict.__init__(w)
     w._native = None
     w.info = _InfoProxy(d)
     w.filename = filename
     w._pictures = d.get('_pictures', [])
-    fmt = d.get('_format', '')
     w._format = fmt
     w._has_tags = d.get('_has_tags', True)
     tag_keys = d.get('_keys', [])
@@ -258,19 +343,12 @@ def _make_cached_fast(d, filename):
     return w
 
 
+# ──────────────────────────────────────────────────────────────
+# Format-specific factory functions
+# ──────────────────────────────────────────────────────────────
+
 def MP3(filename):
-    """Open an MP3 file and return a file object with info and tags.
-
-    Args:
-        filename: Path to the MP3 file.
-
-    Returns:
-        A file object with .info (MPEGInfo), .tags (dict of ID3 frames),
-        and dict-like tag access.
-
-    Raises:
-        MutagenError: If the file cannot be parsed.
-    """
+    """Open an MP3 file and return a file object with info and tags."""
     w = _cache.get(filename)
     if w is not None:
         return w
@@ -284,18 +362,7 @@ def MP3(filename):
 
 
 def FLAC(filename):
-    """Open a FLAC file and return a file object with info and tags.
-
-    Args:
-        filename: Path to the FLAC file.
-
-    Returns:
-        A file object with .info (StreamInfo), .tags (VorbisComment dict),
-        .pictures, and dict-like tag access.
-
-    Raises:
-        MutagenError: If the file cannot be parsed.
-    """
+    """Open a FLAC file and return a file object with info and tags."""
     w = _cache.get(filename)
     if w is not None:
         return w
@@ -309,18 +376,7 @@ def FLAC(filename):
 
 
 def OggVorbis(filename):
-    """Open an OGG Vorbis file and return a file object with info and tags.
-
-    Args:
-        filename: Path to the OGG file.
-
-    Returns:
-        A file object with .info (OggVorbisInfo), .tags (VorbisComment dict),
-        and dict-like tag access.
-
-    Raises:
-        MutagenError: If the file cannot be parsed.
-    """
+    """Open an OGG Vorbis file and return a file object with info and tags."""
     w = _cache.get(filename)
     if w is not None:
         return w
@@ -334,18 +390,7 @@ def OggVorbis(filename):
 
 
 def MP4(filename):
-    """Open an MP4/M4A file and return a file object with info and tags.
-
-    Args:
-        filename: Path to the MP4/M4A file.
-
-    Returns:
-        A file object with .info (MP4Info), .tags (MP4Tags dict),
-        and dict-like tag access.
-
-    Raises:
-        MutagenError: If the file cannot be parsed.
-    """
+    """Open an MP4/M4A file and return a file object with info and tags."""
     w = _cache.get(filename)
     if w is not None:
         return w
@@ -358,28 +403,306 @@ def MP4(filename):
     return w
 
 
+# ──────────────────────────────────────────────────────────────
+# EasyID3 / EasyMP3 / EasyMP4
+# ──────────────────────────────────────────────────────────────
+
+# Mapping from easy key names to ID3 frame IDs
+_EASY_ID3_MAP = {
+    'title': 'TIT2',
+    'artist': 'TPE1',
+    'album': 'TALB',
+    'albumartist': 'TPE2',
+    'tracknumber': 'TRCK',
+    'discnumber': 'TPOS',
+    'genre': 'TCON',
+    'date': 'TDRC',
+    'composer': 'TCOM',
+    'lyricist': 'TEXT',
+    'length': 'TLEN',
+    'organization': 'TPUB',
+    'copyright': 'TCOP',
+    'isrc': 'TSRC',
+    'mood': 'TMOO',
+    'bpm': 'TBPM',
+    'grouping': 'TIT1',
+    'media': 'TMED',
+    'encodedby': 'TENC',
+    'website': 'WOAR',
+    'conductor': 'TPE3',
+    'arranger': 'TPE4',
+    'discsubtitle': 'TSST',
+    'language': 'TLAN',
+    'version': 'TIT3',
+    'performer': 'TMCL',
+    'albumsort': 'TSOA',
+    'albumartistsort': 'TSO2',
+    'artistsort': 'TSOP',
+    'titlesort': 'TSOT',
+    'composersort': 'TSOC',
+}
+
+_EASY_ID3_REVERSE = {v: k for k, v in _EASY_ID3_MAP.items()}
+
+
+class _EasyTagView(dict):
+    """Dict-like view mapping human-readable keys to actual tag keys."""
+
+    def __init__(self, wrapped, key_map, reverse_map):
+        super().__init__()
+        self._wrapped = wrapped
+        self._key_map = key_map
+        self._reverse_map = reverse_map
+        # Populate easy keys from wrapped tags
+        for tag_key in wrapped.keys():
+            easy_key = reverse_map.get(tag_key)
+            if easy_key is not None:
+                val = wrapped[tag_key]
+                # Normalize to list of strings
+                if isinstance(val, _ID3Value):
+                    dict.__setitem__(self, easy_key, list(val))
+                elif isinstance(val, list):
+                    dict.__setitem__(self, easy_key, val)
+                else:
+                    dict.__setitem__(self, easy_key, [str(val)])
+
+    def __getitem__(self, key):
+        return dict.__getitem__(self, key)
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, value if isinstance(value, list) else [value])
+        tag_key = self._key_map.get(key)
+        if tag_key is not None:
+            self._wrapped[tag_key] = value
+
+    def __delitem__(self, key):
+        dict.__delitem__(self, key)
+        tag_key = self._key_map.get(key)
+        if tag_key is not None and tag_key in self._wrapped:
+            del self._wrapped[tag_key]
+
+    def __contains__(self, key):
+        return dict.__contains__(self, key)
+
+
+class EasyID3(_EasyTagView):
+    """Easy-access interface for ID3 tags, mapping human-readable names to frames.
+
+    Compatible with mutagen.easyid3.EasyID3.
+    """
+    def __init__(self, filename=None):
+        self.filename = filename
+        self._file = None
+        if filename is not None:
+            self._file = MP3(filename)
+            super().__init__(self._file, _EASY_ID3_MAP, _EASY_ID3_REVERSE)
+        else:
+            super().__init__({}, _EASY_ID3_MAP, _EASY_ID3_REVERSE)
+
+    def save(self, *args, **kwargs):
+        if self._file is not None:
+            self._file.save(*args, **kwargs)
+
+    @property
+    def info(self):
+        if self._file is not None:
+            return self._file.info
+        return None
+
+    @property
+    def tags(self):
+        return self
+
+
+# Mapping from easy key names to MP4 atom keys
+_EASY_MP4_MAP = {
+    'title': '\xa9nam',
+    'artist': '\xa9ART',
+    'album': '\xa9alb',
+    'albumartist': 'aART',
+    'date': '\xa9day',
+    'genre': '\xa9gen',
+    'comment': '\xa9cmt',
+    'composer': '\xa9wrt',
+    'grouping': '\xa9grp',
+    'tracknumber': 'trkn',
+    'discnumber': 'disk',
+    'bpm': 'tmpo',
+    'copyright': 'cprt',
+    'lyrics': '\xa9lyr',
+    'encodedby': '\xa9too',
+}
+
+_EASY_MP4_REVERSE = {v: k for k, v in _EASY_MP4_MAP.items()}
+
+
+class EasyMP4Tags(_EasyTagView):
+    """Easy-access interface for MP4 tags."""
+    def __init__(self, filename=None):
+        self.filename = filename
+        self._file = None
+        if filename is not None:
+            self._file = MP4(filename)
+            super().__init__(self._file, _EASY_MP4_MAP, _EASY_MP4_REVERSE)
+        else:
+            super().__init__({}, _EASY_MP4_MAP, _EASY_MP4_REVERSE)
+
+    def save(self, *args, **kwargs):
+        if self._file is not None:
+            self._file.save(*args, **kwargs)
+
+    @property
+    def info(self):
+        if self._file is not None:
+            return self._file.info
+        return None
+
+    @property
+    def tags(self):
+        return self
+
+
+class EasyMP3(_MP3File):
+    """MP3 file with EasyID3-style tag access."""
+    __slots__ = ('_easy_tags',)
+
+    def __new__(cls, filename):
+        obj = MP3(filename)
+        # Create an EasyMP3 wrapper around the existing MP3 result
+        easy = _MP3File.__new__(cls)
+        dict.__init__(easy)
+        return easy
+
+    def __init__(self, filename):
+        self._easy_tags = EasyID3(filename)
+        inner = self._easy_tags._file
+        self._native = inner._native
+        self.info = inner.info
+        self.filename = inner.filename
+        self._pictures = inner._pictures
+        self._format = inner._format
+        self._has_tags = inner._has_tags
+        self._tag_keys = list(self._easy_tags.keys())
+        for k, v in self._easy_tags.items():
+            dict.__setitem__(self, k, v)
+
+    @property
+    def tags(self):
+        return self._easy_tags
+
+    def keys(self):
+        return list(self._easy_tags.keys())
+
+    def __getitem__(self, key):
+        return self._easy_tags[key]
+
+    def __setitem__(self, key, value):
+        self._easy_tags[key] = value
+
+    def save(self, *args, **kwargs):
+        self._easy_tags.save(*args, **kwargs)
+
+EasyMP3.__name__ = 'EasyMP3'
+EasyMP3.__qualname__ = 'EasyMP3'
+
+
+class EasyMP4(_MP4File):
+    """MP4 file with EasyMP4Tags-style tag access."""
+    __slots__ = ('_easy_tags',)
+
+    def __new__(cls, filename):
+        obj = MP4(filename)
+        easy = _MP4File.__new__(cls)
+        dict.__init__(easy)
+        return easy
+
+    def __init__(self, filename):
+        self._easy_tags = EasyMP4Tags(filename)
+        inner = self._easy_tags._file
+        self._native = inner._native
+        self.info = inner.info
+        self.filename = inner.filename
+        self._pictures = inner._pictures
+        self._format = inner._format
+        self._has_tags = inner._has_tags
+        self._tag_keys = list(self._easy_tags.keys())
+        for k, v in self._easy_tags.items():
+            dict.__setitem__(self, k, v)
+
+    @property
+    def tags(self):
+        return self._easy_tags
+
+    def keys(self):
+        return list(self._easy_tags.keys())
+
+    def __getitem__(self, key):
+        return self._easy_tags[key]
+
+    def __setitem__(self, key, value):
+        self._easy_tags[key] = value
+
+    def save(self, *args, **kwargs):
+        self._easy_tags.save(*args, **kwargs)
+
+EasyMP4.__name__ = 'EasyMP4'
+EasyMP4.__qualname__ = 'EasyMP4'
+
+
+# ──────────────────────────────────────────────────────────────
+# File() auto-detection with easy= support
+# ──────────────────────────────────────────────────────────────
+
+_EASY_CONSTRUCTORS = {
+    'mp3': EasyMP3,
+    'flac': FLAC,  # FLAC/OGG use vorbis comments which are already "easy"
+    'ogg': OggVorbis,
+    'mp4': EasyMP4,
+}
+
+_NORMAL_CONSTRUCTORS = {
+    'mp3': MP3,
+    'flac': FLAC,
+    'ogg': OggVorbis,
+    'mp4': MP4,
+}
+
+
 def File(filename, easy=False):
     """Auto-detect format and open an audio file.
 
     Args:
         filename: Path to the audio file.
-        easy: Ignored (for mutagen API compatibility).
+        easy: If True, return an EasyID3/EasyMP4-wrapped file.
 
     Returns:
         A file object with .info and .tags, or None if the format
         is not recognized.
     """
-    w = _cache.get(filename)
-    if w is not None:
-        return w
+    if not easy:
+        w = _cache.get(filename)
+        if w is not None:
+            return w
     try:
         d = _fast_read(filename)
     except (MutagenError, ValueError, OSError):
         return None
+    fmt = d.get('_format', '')
+    if easy:
+        constructor = _EASY_CONSTRUCTORS.get(fmt)
+        if constructor is not None:
+            try:
+                return constructor(filename)
+            except Exception:
+                return None
     w = _make_cached_fast(d, filename)
     _cache[filename] = w
     return w
 
+
+# ──────────────────────────────────────────────────────────────
+# batch_open with ID3Value wrapping
+# ──────────────────────────────────────────────────────────────
 
 def batch_open(filenames):
     """Open multiple audio files in parallel using Rust I/O.
@@ -394,6 +717,15 @@ def batch_open(filenames):
     if filenames is _last_batch[0] and _last_batch[1] is not None:
         return _last_batch[1]
     result = _rust_batch_open(filenames)
+    # Wrap ID3 tag values in _ID3Value for MP3 files
+    for path, d in result.items():
+        tags = d.get('tags')
+        if tags and path.lower().endswith('.mp3'):
+            for k, v in tags.items():
+                if isinstance(v, list):
+                    tags[k] = _ID3Value(v)
+                else:
+                    tags[k] = _ID3Value([v])
     _last_batch[0] = filenames
     _last_batch[1] = result
     return result
@@ -413,3 +745,12 @@ def clear_all_caches():
     _last_batch[0] = None
     _last_batch[1] = None
     _rust_clear_all_caches()
+
+
+# ──────────────────────────────────────────────────────────────
+# mutagen-compatible base class aliases
+# ──────────────────────────────────────────────────────────────
+
+FileType = _CachedFile
+Tags = dict
+Metadata = dict
