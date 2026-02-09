@@ -520,6 +520,8 @@ struct PyStreamInfo {
     min_frame_size: u32,
     #[pyo3(get)]
     max_frame_size: u32,
+    #[pyo3(get)]
+    bitrate: u32,
 }
 
 #[pymethods]
@@ -536,11 +538,6 @@ impl PyStreamInfo {
             "FLAC, {:.2} seconds, {} Hz",
             self.length, self.sample_rate
         )
-    }
-
-    #[getter]
-    fn bitrate(&self) -> u32 {
-        self.bits_per_sample as u32 * self.sample_rate * self.channels as u32
     }
 }
 
@@ -623,6 +620,11 @@ impl PyFLAC {
     fn from_data(py: Python<'_>, data: &[u8], filename: &str) -> PyResult<Self> {
         let mut flac_file = flac::FLACFile::parse(data, filename)?;
 
+        // Compute bitrate from audio data size (exclude metadata), matching mutagen
+        let audio_data_size = data.len().saturating_sub(flac_file.flac_offset + flac_file.metadata_length);
+        let bitrate = if flac_file.info.length > 0.0 {
+            (audio_data_size as f64 * 8.0 / flac_file.info.length) as u32
+        } else { 0 };
         let info = PyStreamInfo {
             length: flac_file.info.length,
             channels: flac_file.info.channels,
@@ -633,6 +635,7 @@ impl PyFLAC {
             max_block_size: flac_file.info.max_block_size,
             min_frame_size: flac_file.info.min_frame_size,
             max_frame_size: flac_file.info.max_frame_size,
+            bitrate,
         };
 
         flac_file.ensure_tags();
@@ -1603,8 +1606,11 @@ fn parse_flac_batch(data: &[u8], file_size: usize) -> Option<PreSerializedFile> 
     // This avoids ~15 String allocations per file during the rayon parallel phase.
     let lazy_vc = vc_pos.map(|(off, sz)| data[off..off.saturating_add(sz).min(data.len())].to_vec());
 
+    // Bitrate: use audio data size only (exclude metadata), matching mutagen behavior
+    // pos points to the start of audio frames after the metadata block loop
+    let audio_data_size = file_size.saturating_sub(pos);
     let bitrate = if length > 0.0 {
-        Some((file_size as f64 * 8.0 / length) as u32)
+        Some((audio_data_size as f64 * 8.0 / length) as u32)
     } else { None };
 
     Some(PreSerializedFile {
@@ -3647,7 +3653,7 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], file_size: usize, di
     };
 
     let mut pos = flac_offset + 4;
-    let mut has_streaminfo = false;
+    let mut streaminfo: Option<flac::StreamInfo> = None;
     let mut vc_data: Option<&[u8]> = None;
     let mut picture_blocks: Vec<(usize, usize)> = Vec::new();
 
@@ -3663,19 +3669,7 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], file_size: usize, di
         match bt {
             0 => {
                 if let Ok(si) = flac::StreamInfo::parse(&data[pos..pos+block_size]) {
-                    let bitrate = if si.length > 0.0 {
-                        (file_size as f64 * 8.0 / si.length) as u32
-                    } else { 0 };
-                    let dict_ptr = dict.as_ptr();
-                    unsafe {
-                        set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), si.length);
-                        set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), si.sample_rate);
-                        set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), si.channels as u32);
-                        set_dict_u32(dict_ptr, pyo3::intern!(py, "bits_per_sample").as_ptr(), si.bits_per_sample as u32);
-                        set_dict_i64(dict_ptr, pyo3::intern!(py, "total_samples").as_ptr(), si.total_samples as i64);
-                        set_dict_u32(dict_ptr, pyo3::intern!(py, "bitrate").as_ptr(), bitrate);
-                    }
-                    has_streaminfo = true;
+                    streaminfo = Some(si);
                 }
             }
             4 => {
@@ -3693,7 +3687,25 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], file_size: usize, di
         if is_last { break; }
     }
 
-    if !has_streaminfo { return Ok(false); }
+    // pos now points to the start of audio frames (after all metadata blocks)
+    let si = match streaminfo {
+        Some(si) => si,
+        None => return Ok(false),
+    };
+    // Bitrate: use audio data size only (exclude metadata), matching mutagen behavior
+    let audio_data_size = file_size.saturating_sub(pos);
+    let bitrate = if si.length > 0.0 {
+        (audio_data_size as f64 * 8.0 / si.length) as u32
+    } else { 0 };
+    let dict_ptr = dict.as_ptr();
+    unsafe {
+        set_dict_f64(dict_ptr, pyo3::intern!(py, "length").as_ptr(), si.length);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "sample_rate").as_ptr(), si.sample_rate);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "channels").as_ptr(), si.channels as u32);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "bits_per_sample").as_ptr(), si.bits_per_sample as u32);
+        set_dict_i64(dict_ptr, pyo3::intern!(py, "total_samples").as_ptr(), si.total_samples as i64);
+        set_dict_u32(dict_ptr, pyo3::intern!(py, "bitrate").as_ptr(), bitrate);
+    }
 
     let mut keys_out: Vec<*mut pyo3::ffi::PyObject> = Vec::with_capacity(16);
     if let Some(vc) = vc_data {
@@ -3721,6 +3733,11 @@ fn fast_read_flac_direct<'py>(py: Python<'py>, data: &[u8], file_size: usize, di
     }
 
     set_keys_list(py, dict, keys_out)?;
+    unsafe {
+        let fmt = pyo3::ffi::PyUnicode_InternFromString(b"flac\0".as_ptr() as *const std::ffi::c_char);
+        pyo3::ffi::PyDict_SetItem(dict.as_ptr(), pyo3::intern!(py, "_format").as_ptr(), fmt);
+        pyo3::ffi::Py_DECREF(fmt);
+    }
     Ok(true)
 }
 
@@ -3800,6 +3817,11 @@ fn fast_read_ogg_direct<'py>(py: Python<'py>, data: &[u8], dict: &Bound<'py, PyD
         parse_vc_to_dict_direct(py, &comment_packet[7..], dict, &mut keys_out)?;
     }
     set_keys_list(py, dict, keys_out)?;
+    unsafe {
+        let fmt = pyo3::ffi::PyUnicode_InternFromString(b"ogg\0".as_ptr() as *const std::ffi::c_char);
+        pyo3::ffi::PyDict_SetItem(dict.as_ptr(), pyo3::intern!(py, "_format").as_ptr(), fmt);
+        pyo3::ffi::Py_DECREF(fmt);
+    }
     Ok(true)
 }
 
@@ -3913,6 +3935,14 @@ fn fast_read_mp3_direct<'py>(py: Python<'py>, data: &[u8], _path: &str, dict: &B
     }
 
     set_keys_list(py, dict, key_ptrs)?;
+    unsafe {
+        let fmt = pyo3::ffi::PyUnicode_InternFromString(b"mp3\0".as_ptr() as *const std::ffi::c_char);
+        pyo3::ffi::PyDict_SetItem(dict.as_ptr(), pyo3::intern!(py, "_format").as_ptr(), fmt);
+        pyo3::ffi::Py_DECREF(fmt);
+        // _has_tags: true only if an ID3 header was found
+        let has_tags = if id3_header.is_some() { pyo3::ffi::Py_True() } else { pyo3::ffi::Py_False() };
+        pyo3::ffi::PyDict_SetItem(dict.as_ptr(), pyo3::intern!(py, "_has_tags").as_ptr(), has_tags);
+    }
     Ok(true)
 }
 
@@ -4090,6 +4120,11 @@ fn fast_read_mp4_direct<'py>(py: Python<'py>, data: &[u8], _path: &str, dict: &B
     }
 
     set_keys_list(py, dict, key_ptrs)?;
+    unsafe {
+        let fmt = pyo3::ffi::PyUnicode_InternFromString(b"mp4\0".as_ptr() as *const std::ffi::c_char);
+        pyo3::ffi::PyDict_SetItem(dict.as_ptr(), pyo3::intern!(py, "_format").as_ptr(), fmt);
+        pyo3::ffi::Py_DECREF(fmt);
+    }
     Ok(true)
 }
 
