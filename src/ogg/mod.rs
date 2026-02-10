@@ -439,11 +439,10 @@ impl OggVorbisFile {
             if data.len() >= 28 {
                 let num_segments = data[26] as usize;
                 let header_size = 27 + num_segments;
-                if header_size + 7 <= data.len() {
-                    if &data[header_size..header_size + 7] == b"\x01vorbis" {
+                if header_size + 7 <= data.len()
+                    && &data[header_size..header_size + 7] == b"\x01vorbis" {
                         score += 2;
                     }
-                }
             }
         }
         score

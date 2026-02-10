@@ -78,7 +78,7 @@ impl ID3Header {
         let revision = data[4];
 
         // We support versions 2.2, 2.3, 2.4
-        if major > 4 || major < 2 {
+        if !(2..=4).contains(&major) {
             return Err(MutagenError::ID3UnsupportedVersion(
                 format!("ID3v2.{}.{}", major, revision),
             ));

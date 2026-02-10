@@ -28,7 +28,7 @@ pub fn render_tag(tags: &ID3Tags, version: u8) -> Result<Vec<u8>> {
     tag.extend_from_slice(&frame_data);
 
     // Padding
-    tag.extend(std::iter::repeat(0u8).take(padding));
+    tag.extend(std::iter::repeat_n(0u8, padding));
 
     Ok(tag)
 }

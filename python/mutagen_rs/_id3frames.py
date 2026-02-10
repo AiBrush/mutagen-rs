@@ -5,6 +5,8 @@ plus enums (PictureType, BitrateMode, CTOCFlags, ID3v1SaveOptions)
 and ID3TimeStamp.
 """
 
+import functools
+
 
 # ──────────────────────────────────────────────────────────────
 # Enums
@@ -79,6 +81,7 @@ MONO = 3
 # ID3TimeStamp
 # ──────────────────────────────────────────────────────────────
 
+@functools.total_ordering
 class ID3TimeStamp:
     """Represents an ID3v2.4 timestamp (e.g. '2024-01-15T12:30:00')."""
 
@@ -213,8 +216,12 @@ class Frame:
     def __repr__(self):
         return f'{self.FrameID}({self._pprint()!r})'
 
-    def __hash__(self):
-        raise TypeError(f'unhashable type: {type(self).__name__!r}')
+    def __eq__(self, other):
+        if not isinstance(other, Frame):
+            return NotImplemented
+        return self.HashKey == other.HashKey
+
+    __hash__ = None
 
 
 class TextFrame(Frame):

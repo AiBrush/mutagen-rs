@@ -134,7 +134,7 @@ pub fn find_atom_path_in(data: &[u8], start: usize, end: usize, path: &[&[u8; 4]
 
 // Keep the old signature for backward compatibility
 #[allow(dead_code)]
-pub fn find_atom_path_legacy<'a>(data: &[u8], atoms: &'a [Atom], path: &[&[u8; 4]]) -> Option<Atom> {
+pub fn find_atom_path_legacy(data: &[u8], atoms: &[Atom], path: &[&[u8; 4]]) -> Option<Atom> {
     if path.is_empty() {
         return None;
     }

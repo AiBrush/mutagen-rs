@@ -73,4 +73,12 @@ __all__ = [
     'POPM', 'PCNT', 'PCST', 'GEOB', 'RBUF', 'AENC', 'LINK', 'POSS',
     'UFID', 'USER', 'OWNE', 'COMR', 'ENCR', 'GRID', 'PRIV', 'SIGN',
     'SEEK', 'ASPI', 'MCDI', 'ETCO', 'MLLT', 'SYTC', 'CRM', 'CHAP', 'CTOC',
+    # v2.2 aliases
+    'UFI', 'TT1', 'TT2', 'TT3', 'TP1', 'TP2', 'TP3', 'TP4', 'TCM', 'TXT',
+    'TLA', 'TCO', 'TAL', 'TPA', 'TRK', 'TRC', 'TYE', 'TDA', 'TIM', 'TRD',
+    'TMT', 'TFT', 'TBP', 'TCP', 'TCR', 'TPB', 'TEN', 'TST', 'TSA', 'TS2',
+    'TSP', 'TSC', 'TSS', 'TOF', 'TLE', 'TSI', 'TDY', 'TKE', 'TOT', 'TOA',
+    'TOL', 'TOR', 'TXX', 'WAF', 'WAR', 'WAS', 'WCM', 'WCP', 'WPB', 'WXX',
+    'IPL', 'MCI', 'ETC', 'MLL', 'STC', 'ULT', 'SLT', 'COM', 'RVA', 'REV',
+    'PIC', 'GEO', 'CNT', 'POP', 'BUF', 'CRA', 'LNK', 'MVN', 'MVI', 'GP1',
 ]
