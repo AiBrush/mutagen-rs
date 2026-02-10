@@ -403,13 +403,42 @@ def _make_cached_fast(d, filename):
     w._tag_keys = tag_keys
     # ID3 formats (mp3) use _ID3Value so str() returns text, not "['text']"
     is_id3 = (fmt == 'mp3')
+    is_mp4 = (fmt == 'mp4')
     for k in tag_keys:
         v = d[k]
-        if isinstance(v, list):
-            w[k] = _ID3Value(v) if is_id3 else v
+        if is_id3:
+            w[k] = _ID3Value(v) if isinstance(v, list) else _ID3Value([v])
+        elif is_mp4:
+            w[k] = _wrap_mp4_value(k, v)
         else:
-            w[k] = _ID3Value([v]) if is_id3 else [v]
+            w[k] = v if isinstance(v, list) else [v]
     return w
+
+
+def _wrap_mp4_value(key, value):
+    """Wrap raw MP4 tag values in proper types (MP4Cover, MP4FreeForm)."""
+    if key == 'covr':
+        # Cover art: wrap bytes in MP4Cover
+        if isinstance(value, list):
+            return [MP4Cover(item) if isinstance(item, bytes) else item
+                    for item in value]
+        elif isinstance(value, bytes):
+            # Detect format from magic bytes
+            fmt = MP4Cover.FORMAT_PNG if value[:4] == b'\x89PNG' else MP4Cover.FORMAT_JPEG
+            return [MP4Cover(value, imageformat=fmt)]
+        return [value]
+    elif key.startswith('----:'):
+        # Freeform atoms: wrap in MP4FreeForm
+        if isinstance(value, list):
+            return [MP4FreeForm(item) if isinstance(item, (bytes, str)) else item
+                    for item in value]
+        elif isinstance(value, (bytes, str)):
+            v = value.encode('utf-8') if isinstance(value, str) else value
+            return [MP4FreeForm(v)]
+        return [value]
+    else:
+        # Standard MP4 tags: keep as list
+        return value if isinstance(value, list) else [value]
 
 
 # ──────────────────────────────────────────────────────────────

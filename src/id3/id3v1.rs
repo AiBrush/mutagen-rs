@@ -137,35 +137,32 @@ pub fn make_id3v1(frames: &[Frame]) -> Vec<u8> {
     tag[2] = b'G';
 
     for frame in frames {
-        match frame {
-            Frame::Text(f) => {
-                let text = f.text.first().map(|s| s.as_str()).unwrap_or("");
-                match f.id.as_str() {
-                    "TIT2" => write_v1_string(&mut tag[3..33], text),
-                    "TPE1" => write_v1_string(&mut tag[33..63], text),
-                    "TALB" => write_v1_string(&mut tag[63..93], text),
-                    "TDRC" | "TYER" => write_v1_string(&mut tag[93..97], text),
-                    "TRCK" => {
-                        if let Ok(n) = text.split('/').next().unwrap_or("").parse::<u8>() {
-                            tag[125] = 0;
-                            tag[126] = n;
-                        }
+        if let Frame::Text(f) = frame {
+            let text = f.text.first().map(|s| s.as_str()).unwrap_or("");
+            match f.id.as_str() {
+                "TIT2" => write_v1_string(&mut tag[3..33], text),
+                "TPE1" => write_v1_string(&mut tag[33..63], text),
+                "TALB" => write_v1_string(&mut tag[63..93], text),
+                "TDRC" | "TYER" => write_v1_string(&mut tag[93..97], text),
+                "TRCK" => {
+                    if let Ok(n) = text.split('/').next().unwrap_or("").parse::<u8>() {
+                        tag[125] = 0;
+                        tag[126] = n;
                     }
-                    "TCON" => {
-                        let genres = specs::parse_genre(text);
-                        if let Some(genre_name) = genres.first() {
-                            if let Some(idx) = GENRES.iter().position(|&g| g == genre_name.as_str())
-                            {
-                                tag[127] = idx as u8;
-                            } else {
-                                tag[127] = 255; // Unknown
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                "TCON" => {
+                    let genres = specs::parse_genre(text);
+                    if let Some(genre_name) = genres.first() {
+                        if let Some(idx) = GENRES.iter().position(|&g| g == genre_name.as_str())
+                        {
+                            tag[127] = idx as u8;
+                        } else {
+                            tag[127] = 255; // Unknown
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 

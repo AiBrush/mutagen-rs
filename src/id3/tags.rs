@@ -95,6 +95,12 @@ pub struct ID3Tags {
     pub(crate) raw_buf: Vec<u8>,
 }
 
+impl Default for ID3Tags {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ID3Tags {
     pub fn new() -> Self {
         ID3Tags {
@@ -302,10 +308,7 @@ impl ID3Tags {
 
             // Check for PIC frame directly on bytes (avoid String allocation)
             if id_bytes == b"PIC" {
-                match parse_v22_picture_frame(frame_data) {
-                    Ok(frame) => self.add(frame),
-                    Err(_) => {}
-                }
+                if let Ok(frame) = parse_v22_picture_frame(frame_data) { self.add(frame) }
                 continue;
             }
 

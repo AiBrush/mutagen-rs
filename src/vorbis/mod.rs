@@ -8,6 +8,12 @@ pub struct VorbisComment {
     pub comments: Vec<(String, String)>,
 }
 
+impl Default for VorbisComment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VorbisComment {
     pub fn new() -> Self {
         VorbisComment {
@@ -139,7 +145,7 @@ impl VorbisComment {
         let mut dict: HashMap<String, Vec<String>> = HashMap::new();
         for (key, value) in &self.comments {
             dict.entry(key.to_lowercase())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(value.clone());
         }
         dict

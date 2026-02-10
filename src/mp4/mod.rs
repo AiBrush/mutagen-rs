@@ -63,7 +63,7 @@ pub enum MP4TagValue {
 }
 
 /// Complete MP4 tag container (Vec-based for cache locality and low allocation).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MP4Tags {
     pub items: Vec<(String, MP4TagValue)>,
 }
@@ -71,9 +71,7 @@ pub struct MP4Tags {
 impl MP4Tags {
     #[inline]
     pub fn new() -> Self {
-        MP4Tags {
-            items: Vec::new(),
-        }
+        Self::default()
     }
 
     #[inline]
@@ -212,8 +210,7 @@ impl MP4File {
 fn read_descriptor_length(data: &[u8]) -> (usize, usize) {
     let mut len = 0usize;
     let mut bytes_read = 0;
-    for i in 0..4.min(data.len()) {
-        let b = data[i];
+    for b in data.iter().take(4.min(data.len())).copied() {
         bytes_read += 1;
         len = (len << 7) | (b & 0x7F) as usize;
         if b & 0x80 == 0 { break; }

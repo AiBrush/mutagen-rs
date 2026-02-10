@@ -275,12 +275,10 @@ pub fn parse_text_frame(id: &str, data: &[u8]) -> Result<Frame> {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect()
+    } else if full_text.is_empty() {
+        vec![]
     } else {
-        if full_text.is_empty() {
-            vec![]
-        } else {
-            vec![full_text]
-        }
+        vec![full_text]
     };
 
     Ok(Frame::Text(TextFrame {
